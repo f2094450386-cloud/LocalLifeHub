@@ -5,7 +5,9 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.chen</groupId>
-    <artifactId>hmdp</artifactId>
+    <artifactId>locallifehub</artifactId>
+    <name>LocalLifeHub</name>
+    <description>邻享生活 LocalLifeHub：基于黑马点评 hmdp 改造的本地生活服务平台后端</description>
     <version>1.0-SNAPSHOT</version>
     <parent>
         <groupId>org.springframework.boot</groupId>

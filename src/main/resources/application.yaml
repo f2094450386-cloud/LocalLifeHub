@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: hmdp
+    name: locallifehub
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:hmdp}?useSSL=false&serverTimezone=UTC
