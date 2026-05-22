@@ -1,6 +1,7 @@
 package com.hmdp.controller;
 
 
+import com.hmdp.annotation.RateLimit;
 import com.hmdp.dto.Result;
 import com.hmdp.service.IVoucherOrderService;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -24,7 +25,18 @@ public class VoucherOrderController {
     @Resource
     private IVoucherOrderService  voucherOrderService;
     @PostMapping("seckill/{id}")
+    @RateLimit(
+            key = "'voucher:seckill:' + #p0 + ':' + T(com.hmdp.utils.UserHolder).getUser().getId()",
+            windowSeconds = 1,
+            maxRequests = 1,
+            message = "秒杀请求过于频繁，请稍后再试"
+    )
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);
+    }
+
+    @PostMapping("pay/{id}")
+    public Result payOrder(@PathVariable("id") Long orderId) {
+        return voucherOrderService.payOrder(orderId);
     }
 }

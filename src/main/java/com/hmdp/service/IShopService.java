@@ -30,6 +30,8 @@ public interface IShopService extends IService<Shop> {
      */
     Result update(Shop shop);
 
+    Result preheatHotShop(Long id);
+
     /**
      * 按类型查询商店
      *

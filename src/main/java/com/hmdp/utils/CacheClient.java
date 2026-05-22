@@ -2,10 +2,9 @@ package com.hmdp.utils;
 
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.BooleanUtil;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
-import com.baomidou.mybatisplus.core.toolkit.StringUtils;
-import com.hmdp.entity.Shop;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -14,20 +13,21 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
-import static com.hmdp.utils.RedisConstants.*;
+import static com.hmdp.utils.RedisConstants.CACHE_NULL_TTL;
+import static com.hmdp.utils.RedisConstants.CACHE_RANDOM_TTL_SECONDS;
+import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
+import static com.hmdp.utils.RedisConstants.LOCK_SHOP_TTL;
 
-/**
- * redis工具
- *
- * @author CHEN
- * @date 2022/10/08
- */
 @Slf4j
 @Component
 public class CacheClient {
+
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
     private final StringRedisTemplate stringRedisTemplate;
 
     @Autowired
@@ -35,156 +35,175 @@ public class CacheClient {
         this.stringRedisTemplate = stringRedisTemplate;
     }
 
-    /**
-     * 将任意对象序列化成json存入redis
-     *
-     * @param key   关键
-     * @param value 价值
-     * @param time  时间
-     * @param unit  单位
-     */
     public void set(String key, Object value, Long time, TimeUnit unit) {
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), randomTtl(time, unit), TimeUnit.SECONDS);
     }
 
-    /**
-     * 将任意对象序列化成json存入redis 并且携带逻辑过期时间
-     *
-     * @param key   关键
-     * @param value 价值
-     * @param time  时间
-     * @param unit  单位
-     */
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
-        //封装逻辑过期时间
         RedisData redisData = new RedisData();
         redisData.setData(value);
         redisData.setExpireTime(LocalDateTime.now().plusSeconds(unit.toSeconds(time)));
-        //存入redis
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
     }
 
     /**
-     * 设置空值解决缓存穿透
-     *
-     * @param keyPrefix  关键前缀
-     * @param id         id
-     * @param type       类型
-     * @param dbFallback db回退
-     * @param time       时间
-     * @param unit       单位
-     * @return {@link R}
+     * Empty-string cache prevents cache penetration for ids that do not exist in DB.
      */
     public <R, ID> R queryWithPassThrough(
-            String keyPrefix
-            , ID id
-            , Class<R> type
-            , Function<ID, R> dbFallback
-            , Long time
-            , TimeUnit unit) {
+            String keyPrefix,
+            ID id,
+            Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time,
+            TimeUnit unit) {
         String key = keyPrefix + id;
-        //从redis中查询
         String json = stringRedisTemplate.opsForValue().get(key);
-        //判断是否存在
-        if (StringUtils.isNotEmpty(json)) {
-            //存在直接返回
+        if (StrUtil.isNotBlank(json)) {
             return JSONUtil.toBean(json, type);
         }
-        //判断空值
-        if ("".equals(json)) {
+        if (json != null) {
             return null;
         }
-        //不存在 查询数据库
-        R r = dbFallback.apply(id);
-        if (r == null) {
-            //redis写入空值
-            this.set(key, "", CACHE_NULL_TTL, TimeUnit.SECONDS);
-            //数据库不存在 返回错误
+
+        R data = dbFallback.apply(id);
+        if (data == null) {
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
             return null;
         }
-        //数据库存在 写入redis
-        this.set(key, r, time, unit);
-        //返回
-        return r;
+        set(key, data, time, unit);
+        return data;
+    }
+
+    public <R, ID> R queryWithMutex(
+            String keyPrefix,
+            String lockKeyPrefix,
+            ID id,
+            Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time,
+            TimeUnit unit) {
+        String key = keyPrefix + id;
+        String json = stringRedisTemplate.opsForValue().get(key);
+        if (StrUtil.isNotBlank(json)) {
+            return JSONUtil.toBean(json, type);
+        }
+        if (json != null) {
+            return null;
+        }
+
+        String lockKey = lockKeyPrefix + id;
+        boolean locked = false;
+        try {
+            locked = tryLock(lockKey);
+            if (!locked) {
+                sleepQuietly(50);
+                return queryWithMutex(keyPrefix, lockKeyPrefix, id, type, dbFallback, time, unit);
+            }
+
+            String cachedAgain = stringRedisTemplate.opsForValue().get(key);
+            if (StrUtil.isNotBlank(cachedAgain)) {
+                return JSONUtil.toBean(cachedAgain, type);
+            }
+            if (cachedAgain != null) {
+                return null;
+            }
+
+            R data = dbFallback.apply(id);
+            if (data == null) {
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                return null;
+            }
+            set(key, data, time, unit);
+            return data;
+        } finally {
+            if (locked) {
+                unlock(lockKey);
+            }
+        }
+    }
+
+    public <R, ID> R queryWithLogicalExpire(
+            String keyPrefix,
+            ID id,
+            Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time,
+            TimeUnit unit) {
+        return queryWithLogicalExpire(keyPrefix, LOCK_SHOP_KEY, id, type, dbFallback, time, unit);
     }
 
     /**
-     * 逻辑过期解决缓存击穿
-     *
-     * @param id id
-     * @return {@link Shop}
+     * Logical expire is intended for preheated hot keys. Expired data is returned first,
+     * then one background thread rebuilds the cache under a Redis mutex.
      */
-    public <R, ID> R queryWithLogicalExpire(String keyPrefix
-            , ID id
-            , Class<R> type
-            , Function<ID, R> dbFallback
-            , Long time
-            , TimeUnit unit) {
+    public <R, ID> R queryWithLogicalExpire(
+            String keyPrefix,
+            String lockKeyPrefix,
+            ID id,
+            Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time,
+            TimeUnit unit) {
         String key = keyPrefix + id;
-        //从redis中查询
         String json = stringRedisTemplate.opsForValue().get(key);
-        //判断是否存在
-        if (StringUtils.isEmpty(json)) {
-            //不存在返回空
+        if (StrUtil.isBlank(json)) {
             return null;
         }
-        //命中 反序列化
+
         RedisData redisData = JSONUtil.toBean(json, RedisData.class);
         JSONObject jsonObject = (JSONObject) redisData.getData();
-        R r = BeanUtil.toBean(jsonObject, type);
-        LocalDateTime expireTime = redisData.getExpireTime();
-        //判断是否过期
-        if (expireTime.isAfter(LocalDateTime.now())) {
-            //未过期 直接返回
-            return r;
+        R data = BeanUtil.toBean(jsonObject, type);
+        if (redisData.getExpireTime().isAfter(LocalDateTime.now())) {
+            return data;
         }
-        //已过期
-        //获取互斥锁
-        String lockKey = LOCK_SHOP_KEY + id;
-        boolean flag = tryLock(lockKey);
-        //是否获取锁成功
-        if (flag) {
-            //成功 异步重建
+
+        String lockKey = lockKeyPrefix + id;
+        if (tryLock(lockKey)) {
             CACHE_REBUILD_EXECUTOR.submit(() -> {
                 try {
-                    //查询数据库
-                    R newR = dbFallback.apply(id);
-                    //写入redis
-                    this.setWithLogicalExpire(key,newR,time,unit);
+                    R freshData = dbFallback.apply(id);
+                    if (freshData == null) {
+                        stringRedisTemplate.delete(key);
+                    } else {
+                        setWithLogicalExpire(key, freshData, time, unit);
+                    }
                 } catch (Exception e) {
-                    throw new RuntimeException(e);
+                    log.error("rebuild logical cache failed, key={}", key, e);
                 } finally {
-                    //释放锁
-                    unLock(lockKey);
+                    unlock(lockKey);
                 }
             });
         }
-        //返回过期商铺信息
-        return r;
+        return data;
     }
 
-    /**
-     * 简易线程池
-     */
-    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    public void delete(String key) {
+        stringRedisTemplate.delete(key);
+    }
 
-    /**
-     * 获取锁
-     *
-     * @param key 关键
-     * @return boolean
-     */
     private boolean tryLock(String key) {
         Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
 
-    /**
-     * 释放锁
-     *
-     * @param key 关键
-     */
-    private void unLock(String key) {
+    private void unlock(String key) {
         stringRedisTemplate.delete(key);
+    }
+
+    private long randomTtl(Long time, TimeUnit unit) {
+        long baseSeconds = unit.toSeconds(time);
+        long randomSeconds = CACHE_RANDOM_TTL_SECONDS <= 0
+                ? 0
+                : ThreadLocalRandom.current().nextLong(CACHE_RANDOM_TTL_SECONDS + 1);
+        return baseSeconds + randomSeconds;
+    }
+
+    private void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting cache mutex", e);
+        }
     }
 }

@@ -1,12 +1,12 @@
 # 当前接口分组
 
-本文档记录当前从 hmdp 继承的接口分组。包名和路径仍沿用原项目，后续改造时再逐步补充请求参数、响应示例和 curl 用例。
+本文档记录当前 LocalLifeHub 源码中已经暴露的主要 HTTP 接口。路径来自 `src/main/java/com/hmdp/controller`，具体业务实现以后续源码讲解为准。
 
 ## `/user`
 
-- `POST /user/code`：发送手机验证码。
+- `POST /user/code`：发送手机验证码，已接入 `@RateLimit`，同一手机号 60 秒 1 次。
 - `POST /user/login`：手机号验证码登录。
-- `POST /user/logout`：登出，占位实现，当前返回未完成功能。
+- `POST /user/logout`：登出，占位实现，当前返回“功能未完成”。
 - `GET /user/me`：获取当前登录用户。
 - `GET /user/info/{id}`：获取用户详情。
 - `GET /user/{id}`：按 ID 查询用户摘要。
@@ -15,10 +15,11 @@
 
 ## `/shop`
 
-- `GET /shop/{id}`：按 ID 查询商户详情，经过商户缓存逻辑。
+- `GET /shop/{id}`：按 ID 查询商户详情，先查热点逻辑过期缓存，再回退普通缓存互斥重建。
 - `POST /shop`：新增商户。
-- `PUT /shop`：更新商户。
-- `GET /shop/of/type`：按商户类型分页查询，可带地理坐标。
+- `PUT /shop`：更新商户，事务提交后删除普通缓存和热点缓存，并做延迟双删。
+- `POST /shop/{id}/cache/preheat`：预热热点商户逻辑过期缓存。
+- `GET /shop/of/type`：按商户类型分页查询；带 `x/y` 时使用 Redis GEO 附近商户查询。
 - `GET /shop/of/name`：按名称关键词分页查询商户。
 
 ## `/shop-type`
@@ -50,12 +51,23 @@
 ## `/voucher`
 
 - `POST /voucher`：新增普通优惠券。
-- `POST /voucher/seckill`：新增秒杀优惠券。
+- `POST /voucher/seckill`：新增秒杀优惠券，并初始化 Redis 秒杀库存。
 - `GET /voucher/list/{shopId}`：查询店铺优惠券列表。
 
 ## `/voucher-order`
 
-- `POST /voucher-order/seckill/{id}`：秒杀下单，当前使用 Redis + Lua + Redis Stream。
+- `POST /voucher-order/seckill/{id}`：秒杀下单，当前主线是 Redis Lua 资格校验、本地任务表、RocketMQ 异步落库。
+- `POST /voucher-order/pay/{id}`：最小支付状态接口，只允许订单所属用户把 `CREATED` 订单更新为 `PAID`。
+
+## `/voucher-order-task`
+
+- `GET /voucher-order-task/manual-review?limit=50`：查询进入人工处理状态的秒杀任务。
+- `POST /voucher-order-task/manual-review/{id}/retry`：人工重投 MQ。
+- `POST /voucher-order-task/manual-review/{id}/release-redis`：人工释放 Redis 秒杀资格，释放前会检查 MySQL 订单是否存在。
+
+## `/ai/customer-service`
+
+- `POST /ai/customer-service/chat`：AI 客服对话接口，已接入 `@RateLimit`，使用 LangChain4j、Redis 会话记忆和 Function Calling 查询商户/优惠券数据。
 
 ## `/blog-comments`
 

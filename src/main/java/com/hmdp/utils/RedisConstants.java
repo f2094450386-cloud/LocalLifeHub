@@ -10,13 +10,22 @@ public class RedisConstants {
 
     public static final Long CACHE_SHOP_TTL = 30L;
     public static final String CACHE_SHOP_KEY = "cache:shop:";
+    public static final String CACHE_HOT_SHOP_KEY = "cache:shop:hot:";
+    public static final Long CACHE_RANDOM_TTL_SECONDS = 300L;
+    public static final Long CACHE_SHOP_LOGICAL_TTL = 20L;
+    public static final Long CACHE_SHOP_DELAY_DELETE_SECONDS = 1L;
 
     public static final String LOCK_SHOP_KEY = "lock:shop:";
     public static final Long LOCK_SHOP_TTL = 10L;
 
+    public static final String RATE_LIMIT_KEY = "rate-limit:";
+    public static final String AI_CUSTOMER_SERVICE_MEMORY_KEY = "ai:customer-service:memory:";
+    public static final Long AI_CUSTOMER_SERVICE_MEMORY_TTL = 120L;
+
     public static final String CACHE_TYPE_KEY = "cache:type";
 
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
+    public static final String SECKILL_ORDER_KEY = "seckill:order:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";
