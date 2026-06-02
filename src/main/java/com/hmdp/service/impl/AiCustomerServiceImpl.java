@@ -6,6 +6,7 @@ import com.hmdp.dto.AiChatResponse;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.service.IAiCustomerService;
+import com.hmdp.service.ai.KnowledgeBaseService;
 import com.hmdp.service.ai.LocalLifeHubAiTools;
 import com.hmdp.service.ai.RedisChatMemoryStore;
 import com.hmdp.utils.UserHolder;
@@ -53,6 +54,9 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     @Resource
     private LocalLifeHubAiTools localLifeHubAiTools;
 
+    @Resource
+    private KnowledgeBaseService knowledgeBaseService;
+
     private volatile CustomerServiceAgent customerServiceAgent;
     private volatile StreamingCustomerServiceAgent streamingCustomerServiceAgent;
 
@@ -94,14 +98,29 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     }
 
     private String buildUserMessage(String message) {
+        String knowledgeContext = knowledgeBaseService.search(message);
         String referenceContext = localLifeHubAiTools.buildReferenceContext(message);
-        if (StrUtil.isBlank(referenceContext)) {
+
+        boolean hasKnowledge = !StrUtil.isBlank(knowledgeContext);
+        boolean hasReference = !StrUtil.isBlank(referenceContext);
+
+        if (!hasKnowledge && !hasReference) {
             return message;
         }
-        return "用户原始问题：\n" + message + "\n\n"
-                + "系统预查询到的候选商户和优惠券数据如下。回答时只能基于这些数据或工具返回数据；"
-                + "如果用户问优惠券且 vouchers 为空，请回答未查询到相关数据。\n"
-                + referenceContext;
+
+        StringBuilder sb = new StringBuilder();
+        if (hasKnowledge) {
+            sb.append("以下是平台规则知识库中与用户问题相关的条目，回答规则类问题时只能基于这些内容，不要编造规则：\n");
+            sb.append(knowledgeContext);
+        }
+        if (hasReference) {
+            sb.append("以下是系统预查询到的候选商户和优惠券数据。回答时只能基于这些数据或工具返回数据；");
+            sb.append("如果用户问优惠券且 vouchers 为空，请回答未查询到相关数据。\n");
+            sb.append(referenceContext);
+            sb.append("\n");
+        }
+        sb.append("用户问题：\n").append(message);
+        return sb.toString();
     }
 
     private CustomerServiceAgent getOrCreateAgent() {
@@ -203,9 +222,13 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
         @SystemMessage({
                 "你是邻享生活 LocalLifeHub 的本地生活 AI 客服。",
                 "用户询问商户或优惠券信息时，必须先调用工具查询系统数据，再基于工具返回结果回答。",
+                "用户询问平台规则、退款规则、秒杀规则、商户入驻等问题时，优先使用消息中提供的规则知识库内容回答。",
                 "如果用户消息中包含系统预查询到的候选商户和优惠券数据，可以直接使用该数据回答。",
-                "不要编造不存在的店铺、地址、营业时间、评分、优惠券、库存或使用规则。",
-                "如果工具返回“未查询到相关数据”，必须明确回答“未查询到相关数据”。",
+                "你没有订单查询工具，无法查询任何用户的订单信息。遇到订单相关问题时，必须说明当前不支持订单查询，建议联系人工客服。",
+                "遇到退款、支付、投诉等超出系统能力的问题，说明当前仅能提供规则说明，建议联系人工客服处理。",
+                "不要编造任何不存在的店铺、地址、营业时间、评分、优惠券、库存、使用规则或订单状态。",
+                "不要假装能查询用户个人信息或其他用户的订单、购买记录。",
+                "如果工具返回未查询到相关数据，且规则知识库也没有相关内容，必须明确回答未查询到相关数据。",
                 "回答使用简洁中文，优先给出和用户问题最相关的信息。"
         })
         String chat(@MemoryId String memoryId, @UserMessage String message);
@@ -216,9 +239,13 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
         @SystemMessage({
                 "你是邻享生活 LocalLifeHub 的本地生活 AI 客服。",
                 "用户询问商户或优惠券信息时，必须先调用工具查询系统数据，再基于工具返回结果回答。",
+                "用户询问平台规则、退款规则、秒杀规则、商户入驻等问题时，优先使用消息中提供的规则知识库内容回答。",
                 "如果用户消息中包含系统预查询到的候选商户和优惠券数据，可以直接使用该数据回答。",
-                "不要编造不存在的店铺、地址、营业时间、评分、优惠券、库存或使用规则。",
-                "如果工具返回\\\"未查询到相关数据\\\"，必须明确回答\\\"未查询到相关数据\\\"。",
+                "你没有订单查询工具，无法查询任何用户的订单信息。遇到订单相关问题时，必须说明当前不支持订单查询，建议联系人工客服。",
+                "遇到退款、支付、投诉等超出系统能力的问题，说明当前仅能提供规则说明，建议联系人工客服处理。",
+                "不要编造任何不存在的店铺、地址、营业时间、评分、优惠券、库存、使用规则或订单状态。",
+                "不要假装能查询用户个人信息或其他用户的订单、购买记录。",
+                "如果工具返回未查询到相关数据，且规则知识库也没有相关内容，必须明确回答未查询到相关数据。",
                 "回答使用简洁中文，优先给出和用户问题最相关的信息。"
         })
         TokenStream chat(@MemoryId String memoryId, @UserMessage String message);
