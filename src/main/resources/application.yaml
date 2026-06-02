@@ -59,9 +59,9 @@ ai:
       api-key: ${QWEN_API_KEY:}
       model: ${QWEN_MODEL:qwen-plus}
     minimax:
-      base-url: ${MINIMAX_BASE_URL:https://api.minimax.chat/v1}
+      base-url: ${MINIMAX_BASE_URL:https://api.minimaxi.com/v1}
       api-key: ${MINIMAX_API_KEY:}
-      model: ${MINIMAX_MODEL:MiniMax-M1}
+      model: ${MINIMAX_MODEL:MiniMax-M2.7}
     timeout-ms: ${AI_CUSTOMER_SERVICE_TIMEOUT_MS:10000}
     max-memory-messages: ${AI_CUSTOMER_SERVICE_MAX_MEMORY_MESSAGES:20}
     stream-timeout-ms: ${AI_CUSTOMER_SERVICE_STREAM_TIMEOUT_MS:60000}

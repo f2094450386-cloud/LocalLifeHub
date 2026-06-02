@@ -83,8 +83,8 @@ $env:QWEN_MODEL="qwen-plus"
 
 # MiniMax（切换时设置 AI_ACTIVE=minimax）
 $env:MINIMAX_API_KEY="sk-your-key"
-$env:MINIMAX_BASE_URL="https://api.minimax.chat/v1"
-$env:MINIMAX_MODEL="MiniMax-M1"
+$env:MINIMAX_BASE_URL="https://api.minimaxi.com/v1"
+$env:MINIMAX_MODEL="MiniMax-M2.7"
 ```
 
 Spring Boot 不会自动读取 `.env` 文件。IntelliJ IDEA 用户推荐装 EnvFile 插件指向 `.env`；命令行用户启动前手动 export 以上变量。修改 `AI_ACTIVE` 切换模型后需要重启 Spring Boot，普通环境变量不支持运行时热更新。
