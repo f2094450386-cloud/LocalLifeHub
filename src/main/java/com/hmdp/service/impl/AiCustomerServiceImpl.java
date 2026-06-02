@@ -11,9 +11,11 @@ import com.hmdp.service.ai.RedisChatMemoryStore;
 import com.hmdp.utils.UserHolder;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,6 +44,9 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     @Value("${ai.customer-service.max-memory-messages:20}")
     private Integer maxMemoryMessages;
 
+    @Value("${ai.customer-service.stream-timeout-ms:60000}")
+    private Integer streamTimeoutMs;
+
     @Resource
     private RedisChatMemoryStore redisChatMemoryStore;
 
@@ -49,6 +54,7 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     private LocalLifeHubAiTools localLifeHubAiTools;
 
     private volatile CustomerServiceAgent customerServiceAgent;
+    private volatile StreamingCustomerServiceAgent streamingCustomerServiceAgent;
 
     @Override
     public Result chat(AiChatRequest request) {
@@ -72,6 +78,19 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
             log.error("AI customer service request exception, sessionId={}", sessionId, e);
             return Result.fail("AI 客服暂时不可用，请稍后再试");
         }
+    }
+
+    @Override
+    public TokenStream chatStream(String sessionId, String message) {
+        if (StrUtil.isBlank(message)) {
+            throw new IllegalArgumentException("咨询内容不能为空");
+        }
+        String configError = validateConfig();
+        if (configError != null) {
+            throw new IllegalStateException(configError);
+        }
+        String memoryId = buildMemoryId(resolveSessionId(sessionId));
+        return getOrCreateStreamingAgent().chat(memoryId, buildUserMessage(message.trim()));
     }
 
     private String buildUserMessage(String message) {
@@ -112,6 +131,35 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
                         .build();
             }
             return customerServiceAgent;
+        }
+    }
+
+    private StreamingCustomerServiceAgent getOrCreateStreamingAgent() {
+        StreamingCustomerServiceAgent agent = streamingCustomerServiceAgent;
+        if (agent != null) {
+            return agent;
+        }
+        synchronized (this) {
+            if (streamingCustomerServiceAgent == null) {
+                OpenAiStreamingChatModel streamingChatModel = OpenAiStreamingChatModel.builder()
+                        .baseUrl(normalizeBaseUrl(baseUrl))
+                        .apiKey(apiKey)
+                        .modelName(model)
+                        .temperature(0.2)
+                        .timeout(Duration.ofMillis(timeoutMs == null ? 10000 : timeoutMs))
+                        .build();
+
+                streamingCustomerServiceAgent = AiServices.builder(StreamingCustomerServiceAgent.class)
+                        .streamingChatLanguageModel(streamingChatModel)
+                        .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
+                                .id(memoryId)
+                                .maxMessages(maxMemoryMessages == null ? 20 : maxMemoryMessages)
+                                .chatMemoryStore(redisChatMemoryStore)
+                                .build())
+                        .tools(localLifeHubAiTools)
+                        .build();
+            }
+            return streamingCustomerServiceAgent;
         }
     }
 
@@ -161,5 +209,18 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
                 "回答使用简洁中文，优先给出和用户问题最相关的信息。"
         })
         String chat(@MemoryId String memoryId, @UserMessage String message);
+    }
+
+    private interface StreamingCustomerServiceAgent {
+
+        @SystemMessage({
+                "你是邻享生活 LocalLifeHub 的本地生活 AI 客服。",
+                "用户询问商户或优惠券信息时，必须先调用工具查询系统数据，再基于工具返回结果回答。",
+                "如果用户消息中包含系统预查询到的候选商户和优惠券数据，可以直接使用该数据回答。",
+                "不要编造不存在的店铺、地址、营业时间、评分、优惠券、库存或使用规则。",
+                "如果工具返回\\\"未查询到相关数据\\\"，必须明确回答\\\"未查询到相关数据\\\"。",
+                "回答使用简洁中文，优先给出和用户问题最相关的信息。"
+        })
+        TokenStream chat(@MemoryId String memoryId, @UserMessage String message);
     }
 }
