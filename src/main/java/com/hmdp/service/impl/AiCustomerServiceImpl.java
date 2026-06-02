@@ -6,6 +6,8 @@ import com.hmdp.dto.AiChatResponse;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.service.IAiCustomerService;
+import com.hmdp.service.ai.AiAuditService;
+import com.hmdp.service.ai.AuditTokenStream;
 import com.hmdp.service.ai.KnowledgeBaseService;
 import com.hmdp.service.ai.LocalLifeHubAiTools;
 import com.hmdp.service.ai.RedisChatMemoryStore;
@@ -57,6 +59,9 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     @Resource
     private KnowledgeBaseService knowledgeBaseService;
 
+    @Resource
+    private AiAuditService auditService;
+
     private volatile CustomerServiceAgent customerServiceAgent;
     private volatile StreamingCustomerServiceAgent streamingCustomerServiceAgent;
 
@@ -72,15 +77,22 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
 
         String sessionId = resolveSessionId(request.getSessionId());
         String memoryId = buildMemoryId(sessionId);
+        String originalMessage = request.getMessage().trim();
+        String enrichedMessage = buildUserMessage(originalMessage);
+        AiAuditService.AuditContext ctx = auditService.beginRequest(sessionId, originalMessage);
+        auditService.bindContext(ctx);
         try {
-            String answer = getOrCreateAgent().chat(memoryId, buildUserMessage(request.getMessage().trim()));
+            String answer = getOrCreateAgent().chat(memoryId, enrichedMessage);
             if (StrUtil.isBlank(answer)) {
                 answer = "未查询到相关数据";
             }
+            auditService.logResponse(ctx, answer);
             return Result.ok(new AiChatResponse(sessionId, answer));
         } catch (Exception e) {
             log.error("AI customer service request exception, sessionId={}", sessionId, e);
             return Result.fail("AI 客服暂时不可用，请稍后再试");
+        } finally {
+            auditService.unbindContext();
         }
     }
 
@@ -93,8 +105,16 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
         if (configError != null) {
             throw new IllegalStateException(configError);
         }
-        String memoryId = buildMemoryId(resolveSessionId(sessionId));
-        return getOrCreateStreamingAgent().chat(memoryId, buildUserMessage(message.trim()));
+        String resolvedSessionId = resolveSessionId(sessionId);
+        String memoryId = buildMemoryId(resolvedSessionId);
+        String originalMessage = message.trim();
+        String enrichedMessage = buildUserMessage(originalMessage);
+        AiAuditService.AuditContext ctx = auditService.beginRequest(resolvedSessionId, originalMessage);
+        // Context is NOT bound: LangChain4j 0.35.0 executes @Tool methods on OkHttp
+        // async dispatcher threads where this ThreadLocal is invisible. Streaming
+        // audit covers [REQ] + [RESP] only; tool calls are not captured.
+        TokenStream rawStream = getOrCreateStreamingAgent().chat(memoryId, enrichedMessage);
+        return new AuditTokenStream(rawStream, auditService, ctx);
     }
 
     private String buildUserMessage(String message) {

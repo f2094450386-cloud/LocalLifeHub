@@ -40,6 +40,8 @@ public class LocalLifeHubAiTools {
     private IVoucherService voucherService;
     @Resource
     private ISeckillVoucherService seckillVoucherService;
+    @Resource
+    private AiAuditService auditService;
 
     @Tool(name = "query_shop_info", value = "按店铺 id、店铺名称或店铺类型查询商户信息。找不到时返回未查询到相关数据。")
     public String queryShopInfo(
@@ -49,6 +51,9 @@ public class LocalLifeHubAiTools {
             @P(value = "店铺类型名称，例如 美食、KTV", required = false) String typeName) {
         List<Shop> shops = doQueryShops(shopId, shopName, typeId, typeName);
         if (CollUtil.isEmpty(shops)) {
+            auditService.logToolCall("query_shop_info",
+                    "shopId=" + shopId + " shopName=" + shopName + " typeId=" + typeId + " typeName=" + typeName,
+                    "未查询到相关数据");
             return "未查询到相关数据";
         }
 
@@ -57,7 +62,11 @@ public class LocalLifeHubAiTools {
         for (Shop shop : shops) {
             records.add(buildShopRecord(shop, typeNameMap));
         }
-        return JSONUtil.toJsonStr(records);
+        String result = JSONUtil.toJsonStr(records);
+        auditService.logToolCall("query_shop_info",
+                "shopId=" + shopId + " shopName=" + shopName + " typeId=" + typeId + " typeName=" + typeName,
+                result);
+        return result;
     }
 
     @Tool(name = "query_voucher_info", value = "按店铺 id 或优惠券 id 查询优惠券信息。找不到时返回未查询到相关数据。")
@@ -66,6 +75,9 @@ public class LocalLifeHubAiTools {
             @P(value = "优惠券 id，例如 1", required = false) Long voucherId) {
         List<Voucher> vouchers = doQueryVouchers(shopId, voucherId);
         if (CollUtil.isEmpty(vouchers)) {
+            auditService.logToolCall("query_voucher_info",
+                    "shopId=" + shopId + " voucherId=" + voucherId,
+                    "未查询到相关数据");
             return "未查询到相关数据";
         }
 
@@ -73,7 +85,11 @@ public class LocalLifeHubAiTools {
         for (Voucher voucher : vouchers) {
             records.add(buildVoucherRecord(voucher));
         }
-        return JSONUtil.toJsonStr(records);
+        String result = JSONUtil.toJsonStr(records);
+        auditService.logToolCall("query_voucher_info",
+                "shopId=" + shopId + " voucherId=" + voucherId,
+                result);
+        return result;
     }
 
     public String buildReferenceContext(String message) {
