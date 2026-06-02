@@ -49,8 +49,19 @@ seckill:
 
 ai:
   customer-service:
-    base-url: ${LOCAL_LIFEHUB_LLM_BASE_URL:${AI_CUSTOMER_SERVICE_BASE_URL:}}
-    api-key: ${LOCAL_LIFEHUB_LLM_API_KEY:${AI_CUSTOMER_SERVICE_API_KEY:}}
-    model: ${LOCAL_LIFEHUB_LLM_MODEL:${AI_CUSTOMER_SERVICE_MODEL:}}
+    active: ${AI_ACTIVE:deepseek}
+    deepseek:
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY:}
+      model: ${DEEPSEEK_MODEL:deepseek-chat}
+    qwen:
+      base-url: ${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      api-key: ${QWEN_API_KEY:}
+      model: ${QWEN_MODEL:qwen-plus}
+    minimax:
+      base-url: ${MINIMAX_BASE_URL:https://api.minimax.chat/v1}
+      api-key: ${MINIMAX_API_KEY:}
+      model: ${MINIMAX_MODEL:MiniMax-M1}
     timeout-ms: ${AI_CUSTOMER_SERVICE_TIMEOUT_MS:10000}
     max-memory-messages: ${AI_CUSTOMER_SERVICE_MAX_MEMORY_MESSAGES:20}
+    stream-timeout-ms: ${AI_CUSTOMER_SERVICE_STREAM_TIMEOUT_MS:60000}

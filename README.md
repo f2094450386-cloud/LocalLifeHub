@@ -49,7 +49,7 @@ Get-Content -Raw .\sql\20260512_add_voucher_order_task.sql | docker exec -i loca
 Get-Content -Raw .\sql\20260512_adjust_voucher_order_active_unique_index.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
 ```
 
-更多说明见 [docs/local-run.md](docs/local-run.md)。
+详细学习文档在本地 `docs` 目录，不随仓库发布。
 
 ## 启动方式
 
@@ -65,34 +65,37 @@ mvn -q -DskipTests compile
 mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 ```
 
-AI 客服需要额外配置环境变量。不要硬编码 API Key：
+AI 客服需要额外配置大模型 API Key。推荐方式：复制 `.env.example` 为 `.env`，填入真实 Key，然后通过 IDE EnvFile 插件或手动 export 加载。
 
 ```powershell
-$env:LOCAL_LIFEHUB_LLM_API_KEY="你的API Key"
-$env:LOCAL_LIFEHUB_LLM_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-$env:LOCAL_LIFEHUB_LLM_MODEL="qwen-plus"
+# 模型选择: deepseek、qwen 或 minimax
+$env:AI_ACTIVE="deepseek"
+
+# DeepSeek
+$env:DEEPSEEK_API_KEY="sk-your-key"
+$env:DEEPSEEK_BASE_URL="https://api.deepseek.com"
+$env:DEEPSEEK_MODEL="deepseek-chat"
+
+# 千问（切换时设置 AI_ACTIVE=qwen）
+$env:QWEN_API_KEY="sk-your-key"
+$env:QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:QWEN_MODEL="qwen-plus"
+
+# MiniMax（切换时设置 AI_ACTIVE=minimax）
+$env:MINIMAX_API_KEY="sk-your-key"
+$env:MINIMAX_BASE_URL="https://api.minimax.chat/v1"
+$env:MINIMAX_MODEL="MiniMax-M1"
 ```
+
+Spring Boot 不会自动读取 `.env` 文件。IntelliJ IDEA 用户推荐装 EnvFile 插件指向 `.env`；命令行用户启动前手动 export 以上变量。修改 `AI_ACTIVE` 切换模型后需要重启 Spring Boot，普通环境变量不支持运行时热更新。
 
 ## 接口验证
 
-核心接口 curl 示例见 [docs/api-test.md](docs/api-test.md)，覆盖：
-
-- 登录/验证码
-- 商户查询
-- 秒杀下单
-- 订单关闭
-- AI 客服
-- 限流验证
+核心接口 curl 示例（登录/验证码、商户查询、秒杀下单、订单关闭、AI 客服、限流验证）见本地 `docs` 目录，不随仓库发布。
 
 ## 设计文档
 
-- [docs/cache-design.md](docs/cache-design.md)：商户缓存治理。
-- [docs/seckill-design.md](docs/seckill-design.md)：秒杀链路设计。
-- [docs/consistency.md](docs/consistency.md)：本地任务表补偿和一致性边界。
-- [docs/order-timeout.md](docs/order-timeout.md)：未支付订单超时关闭。
-- [docs/rate-limit.md](docs/rate-limit.md)：通用 AOP 限流。
-- [docs/ai-customer-service.md](docs/ai-customer-service.md)：LangChain4j AI 客服。
-- [docs/resume-version.md](docs/resume-version.md)：真实可写入简历的项目描述。
+详细学习文档在本地 `docs` 目录（缓存治理、秒杀链路、一致性补偿、超时关闭、限流、AI 客服、简历版本等），不随仓库发布。
 
 ## 常见问题
 
@@ -126,12 +129,12 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 ### AI 客服返回未配置
 
-检查三个环境变量是否在启动 Spring Boot 的同一个终端中设置：
+检查当前激活的模型和对应环境变量：
 
 ```powershell
-$env:LOCAL_LIFEHUB_LLM_API_KEY
-$env:LOCAL_LIFEHUB_LLM_BASE_URL
-$env:LOCAL_LIFEHUB_LLM_MODEL
+$env:AI_ACTIVE
+$env:DEEPSEEK_API_KEY   # AI_ACTIVE=deepseek 时需要
+$env:QWEN_API_KEY       # AI_ACTIVE=qwen 时需要
 ```
 
 不要把 API Key 提交到仓库或写入配置文件。

@@ -21,34 +21,22 @@ import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.time.Duration;
 import java.util.UUID;
+import org.springframework.core.env.Environment;
 
 @Slf4j
 @Service
 public class AiCustomerServiceImpl implements IAiCustomerService {
 
-    @Value("${ai.customer-service.base-url:}")
-    private String baseUrl;
+    @Resource
+    private Environment env;
 
-    @Value("${ai.customer-service.api-key:}")
-    private String apiKey;
-
-    @Value("${ai.customer-service.model:}")
-    private String model;
-
-    @Value("${ai.customer-service.timeout-ms:10000}")
-    private Integer timeoutMs;
-
-    @Value("${ai.customer-service.max-memory-messages:20}")
-    private Integer maxMemoryMessages;
-
-    @Value("${ai.customer-service.stream-timeout-ms:60000}")
-    private Integer streamTimeoutMs;
+    private volatile String cachedChatActiveModel;
+    private volatile String cachedStreamingActiveModel;
 
     @Resource
     private RedisChatMemoryStore redisChatMemoryStore;
@@ -144,18 +132,25 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
     }
 
     private CustomerServiceAgent getOrCreateAgent() {
+        String active = resolveActiveModel();
         CustomerServiceAgent agent = customerServiceAgent;
-        if (agent != null) {
+        if (agent != null && active.equals(cachedChatActiveModel)) {
             return agent;
         }
         synchronized (this) {
-            if (customerServiceAgent == null) {
+            if (customerServiceAgent == null || !active.equals(cachedChatActiveModel)) {
+                String baseUrl = resolveBaseUrl();
+                String apiKey = resolveApiKey();
+                String model = resolveModel();
+                int timeoutMs = resolveTimeoutMs();
+                int maxMessages = resolveMaxMemoryMessages();
+
                 OpenAiChatModel chatModel = OpenAiChatModel.builder()
                         .baseUrl(normalizeBaseUrl(baseUrl))
                         .apiKey(apiKey)
                         .modelName(model)
                         .temperature(0.2)
-                        .timeout(Duration.ofMillis(timeoutMs == null ? 10000 : timeoutMs))
+                        .timeout(Duration.ofMillis(timeoutMs))
                         .maxRetries(1)
                         .build();
 
@@ -163,54 +158,64 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
                         .chatLanguageModel(chatModel)
                         .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
                                 .id(memoryId)
-                                .maxMessages(maxMemoryMessages == null ? 20 : maxMemoryMessages)
+                                .maxMessages(maxMessages)
                                 .chatMemoryStore(redisChatMemoryStore)
                                 .build())
                         .tools(localLifeHubAiTools)
                         .build();
+                cachedChatActiveModel = active;
             }
             return customerServiceAgent;
         }
     }
 
     private StreamingCustomerServiceAgent getOrCreateStreamingAgent() {
+        String active = resolveActiveModel();
         StreamingCustomerServiceAgent agent = streamingCustomerServiceAgent;
-        if (agent != null) {
+        if (agent != null && active.equals(cachedStreamingActiveModel)) {
             return agent;
         }
         synchronized (this) {
-            if (streamingCustomerServiceAgent == null) {
+            if (streamingCustomerServiceAgent == null || !active.equals(cachedStreamingActiveModel)) {
+                String baseUrl = resolveBaseUrl();
+                String apiKey = resolveApiKey();
+                String model = resolveModel();
+                int timeoutMs = resolveTimeoutMs();
+                int maxMessages = resolveMaxMemoryMessages();
+
                 OpenAiStreamingChatModel streamingChatModel = OpenAiStreamingChatModel.builder()
                         .baseUrl(normalizeBaseUrl(baseUrl))
                         .apiKey(apiKey)
                         .modelName(model)
                         .temperature(0.2)
-                        .timeout(Duration.ofMillis(timeoutMs == null ? 10000 : timeoutMs))
+                        .timeout(Duration.ofMillis(timeoutMs))
                         .build();
 
                 streamingCustomerServiceAgent = AiServices.builder(StreamingCustomerServiceAgent.class)
                         .streamingChatLanguageModel(streamingChatModel)
                         .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
                                 .id(memoryId)
-                                .maxMessages(maxMemoryMessages == null ? 20 : maxMemoryMessages)
+                                .maxMessages(maxMessages)
                                 .chatMemoryStore(redisChatMemoryStore)
                                 .build())
                         .tools(localLifeHubAiTools)
                         .build();
+                cachedStreamingActiveModel = active;
             }
             return streamingCustomerServiceAgent;
         }
     }
 
     private String validateConfig() {
-        if (StrUtil.isBlank(apiKey)) {
-            return "AI 客服未配置 LOCAL_LIFEHUB_LLM_API_KEY";
+        String active = resolveActiveModel();
+        if (StrUtil.isBlank(resolveApiKey())) {
+            return "AI 客服未配置 " + active + " API Key（环境变量或 .env）";
         }
-        if (StrUtil.isBlank(baseUrl)) {
-            return "AI 客服未配置 LOCAL_LIFEHUB_LLM_BASE_URL";
+        if (StrUtil.isBlank(resolveBaseUrl())) {
+            return "AI 客服未配置 " + active + " Base URL";
         }
-        if (StrUtil.isBlank(model)) {
-            return "AI 客服未配置 LOCAL_LIFEHUB_LLM_MODEL";
+        if (StrUtil.isBlank(resolveModel())) {
+            return "AI 客服未配置 " + active + " Model";
         }
         return null;
     }
@@ -235,6 +240,38 @@ public class AiCustomerServiceImpl implements IAiCustomerService {
             return value.substring(0, value.length() - suffix.length());
         }
         return value;
+    }
+
+    private String resolveActiveModel() {
+        return env.getProperty("ai.customer-service.active", "deepseek");
+    }
+
+    private String resolveModelConfig(String key) {
+        String active = resolveActiveModel();
+        return env.getProperty("ai.customer-service." + active + "." + key);
+    }
+
+    private String resolveBaseUrl() {
+        String url = resolveModelConfig("base-url");
+        return url != null ? url : "";
+    }
+
+    private String resolveApiKey() {
+        String key = resolveModelConfig("api-key");
+        return key != null ? key : "";
+    }
+
+    private String resolveModel() {
+        String model = resolveModelConfig("model");
+        return model != null ? model : "";
+    }
+
+    private int resolveTimeoutMs() {
+        return Integer.parseInt(env.getProperty("ai.customer-service.timeout-ms", "10000"));
+    }
+
+    private int resolveMaxMemoryMessages() {
+        return Integer.parseInt(env.getProperty("ai.customer-service.max-memory-messages", "20"));
     }
 
     private interface CustomerServiceAgent {
