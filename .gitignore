@@ -1,5 +1,10 @@
 HELP.md
 target/
+
+### Local docs — keep on disk, not on GitHub ###
+/docs/
+**/*.md
+!/README.md
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
