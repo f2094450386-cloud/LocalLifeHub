@@ -11,12 +11,15 @@ import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -37,6 +40,14 @@ public class VoucherOrderTaskCompensator {
 
     @Value("${seckill.order-task.compensate-limit:50}")
     private Integer compensateLimit;
+
+    private static final DefaultRedisScript<Long> RELEASE_STOCK_SCRIPT;
+
+    static {
+        RELEASE_STOCK_SCRIPT = new DefaultRedisScript<>();
+        RELEASE_STOCK_SCRIPT.setLocation(new ClassPathResource("release_stock.lua"));
+        RELEASE_STOCK_SCRIPT.setResultType(Long.class);
+    }
 
     @Scheduled(fixedDelayString = "${seckill.order-task.compensate-interval-ms:30000}")
     public void compensate() {
@@ -89,9 +100,18 @@ public class VoucherOrderTaskCompensator {
             log.info("补偿任务转人工但订单已存在，不释放 Redis 资格，taskId={}, orderId={}", task.getId(), task.getOrderId());
             return;
         }
-        stringRedisTemplate.opsForValue().increment(RedisConstants.SECKILL_STOCK_KEY + task.getVoucherId());
-        stringRedisTemplate.opsForSet().remove(RedisConstants.SECKILL_ORDER_KEY + task.getVoucherId(), task.getUserId().toString());
-        log.warn("补偿任务转人工且订单不存在，已释放 Redis 资格，taskId={}, orderId={}, userId={}, voucherId={}",
-                task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());
+        Long result = stringRedisTemplate.execute(
+                RELEASE_STOCK_SCRIPT,
+                Collections.emptyList(),
+                task.getVoucherId().toString(),
+                task.getUserId().toString(),
+                task.getOrderId().toString()
+        );
+        if (result != null && result == 1) {
+            log.warn("补偿任务转人工且订单不存在，已释放 Redis 资格，taskId={}, orderId={}, userId={}, voucherId={}",
+                    task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());
+        } else {
+            log.info("Redis 资格已释放，跳过重复操作，taskId={}, orderId={}", task.getId(), task.getOrderId());
+        }
     }
 }

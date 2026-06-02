@@ -13,10 +13,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.util.Collections;
 import java.util.List;
 
 @Slf4j
@@ -31,6 +34,14 @@ public class ManualReviewServiceImpl implements IManualReviewService {
     private RocketMQTemplate rocketMQTemplate;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    private static final DefaultRedisScript<Long> RELEASE_STOCK_SCRIPT;
+
+    static {
+        RELEASE_STOCK_SCRIPT = new DefaultRedisScript<>();
+        RELEASE_STOCK_SCRIPT.setLocation(new ClassPathResource("release_stock.lua"));
+        RELEASE_STOCK_SCRIPT.setResultType(Long.class);
+    }
 
     @Override
     public Result listVoucherOrderTasks(Integer limit) {
@@ -86,8 +97,13 @@ public class ManualReviewServiceImpl implements IManualReviewService {
             return Result.fail("订单已存在，不能释放 Redis 资格");
         }
 
-        stringRedisTemplate.opsForValue().increment(RedisConstants.SECKILL_STOCK_KEY + task.getVoucherId());
-        stringRedisTemplate.opsForSet().remove(RedisConstants.SECKILL_ORDER_KEY + task.getVoucherId(), task.getUserId().toString());
+        stringRedisTemplate.execute(
+                RELEASE_STOCK_SCRIPT,
+                Collections.emptyList(),
+                task.getVoucherId().toString(),
+                task.getUserId().toString(),
+                task.getOrderId().toString()
+        );
         voucherOrderTaskService.markResolved(taskId, "manual released redis qualification");
         log.warn("人工释放秒杀 Redis 资格，taskId={}, orderId={}, userId={}, voucherId={}",
                 task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());

@@ -15,6 +15,7 @@ import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.service.IVoucherOrderTaskService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.TransactionUtils;
 import com.hmdp.utils.RocketMqConstants;
 import com.hmdp.utils.UserHolder;
 import com.hmdp.utils.VoucherOrderStatus;
@@ -65,11 +66,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private Long orderTimeoutMinutes;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> RELEASE_STOCK_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
+
+        RELEASE_STOCK_SCRIPT = new DefaultRedisScript<>();
+        RELEASE_STOCK_SCRIPT.setLocation(new ClassPathResource("release_stock.lua"));
+        RELEASE_STOCK_SCRIPT.setResultType(Long.class);
     }
 
     /**
@@ -96,7 +102,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         try {
             task = voucherOrderTaskService.createPendingTask(orderId, userId, voucherId);
         } catch (Exception e) {
-            releaseRedisSeckill(voucherId, userId);
+            releaseRedisSeckill(orderId, voucherId, userId);
             log.error("秒杀订单任务写入失败，orderId={}, userId={}, voucherId={}", orderId, userId, voucherId, e);
             return Result.fail("订单排队失败，请稍后重试");
         }
@@ -111,15 +117,20 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             SendResult sendResult = rocketMQTemplate.syncSend(RocketMqConstants.VOUCHER_ORDER_TOPIC, message);
             if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
                 voucherOrderTaskService.markFailed(orderId, "MQ send status: " + sendResult.getSendStatus(), false);
-                releaseRedisSeckill(voucherId, userId);
+                releaseRedisSeckill(orderId, voucherId, userId);
                 log.error("秒杀订单消息发送失败，orderId={}, userId={}, voucherId={}, sendStatus={}",
                         orderId, userId, voucherId, sendResult.getSendStatus());
                 return Result.fail("订单排队失败，请稍后重试");
             }
-            voucherOrderTaskService.markSent(orderId, sendResult.getMsgId());
+            try {
+                voucherOrderTaskService.markSent(orderId, sendResult.getMsgId());
+            } catch (Exception e) {
+                log.error("标记已发送失败，消息已投递，依赖 Compensator 兜底，orderId={}", orderId, e);
+            }
         } catch (Exception e) {
+            // syncSend 异常不确定 broker 是否收到消息，不释放 Redis；
+            // 交给 VoucherOrderTaskCompensator 重投，超过上限且订单不存在时再释放
             voucherOrderTaskService.markFailed(orderId, e.getMessage(), false);
-            releaseRedisSeckill(voucherId, userId);
             log.error("秒杀订单消息发送异常，orderId={}, userId={}, voucherId={}", orderId, userId, voucherId, e);
             return Result.fail("订单排队失败，请稍后重试");
         }
@@ -187,8 +198,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         voucherOrder.setUserId(message.getUserId());
         voucherOrder.setVoucherId(message.getVoucherId());
         createVoucherOrder(voucherOrder);
-        sendOrderTimeoutMessage(voucherOrder);
         voucherOrderTaskService.markConsumed(message.getOrderId());
+        TransactionUtils.afterCommit(() -> sendOrderTimeoutMessageSilently(voucherOrder));
     }
 
     /**
@@ -200,6 +211,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         VoucherOrder voucherOrder = getById(orderId);
         if (voucherOrder == null) {
             log.warn("未支付订单关闭跳过，订单不存在，orderId={}", orderId);
+            return false;
+        }
+        if (Integer.valueOf(VoucherOrderStatus.CLOSED).equals(voucherOrder.getStatus())) {
+            releaseRedisSeckill(orderId, voucherOrder.getVoucherId(), voucherOrder.getUserId());
+            log.info("未支付订单已关闭，补偿执行 Redis 幂等释放，orderId={}, userId={}, voucherId={}",
+                    orderId, voucherOrder.getUserId(), voucherOrder.getVoucherId());
             return false;
         }
         if (!Integer.valueOf(VoucherOrderStatus.CREATED).equals(voucherOrder.getStatus())) {
@@ -224,9 +241,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             throw new IllegalStateException("恢复秒杀券库存失败，orderId=" + orderId + ", voucherId=" + voucherOrder.getVoucherId());
         }
 
-        releaseRedisSeckill(voucherOrder.getVoucherId(), voucherOrder.getUserId());
-        log.info("未支付订单已关闭并恢复库存，orderId={}, userId={}, voucherId={}",
-                orderId, voucherOrder.getUserId(), voucherOrder.getVoucherId());
+        TransactionUtils.afterCommit(() -> {
+            releaseRedisSeckill(orderId, voucherOrder.getVoucherId(), voucherOrder.getUserId());
+            log.info("未支付订单已关闭并恢复库存，orderId={}, userId={}, voucherId={}",
+                    orderId, voucherOrder.getUserId(), voucherOrder.getVoucherId());
+        });
         return true;
     }
 
@@ -297,11 +316,24 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 orderTimeoutDelayLevel, sendResult.getMsgId());
     }
 
+    private void sendOrderTimeoutMessageSilently(VoucherOrder voucherOrder) {
+        try {
+            sendOrderTimeoutMessage(voucherOrder);
+        } catch (Exception e) {
+            log.error("发送订单超时延迟消息失败，依赖 OrderTimeoutScanner 兜底扫描，orderId={}", voucherOrder.getId(), e);
+        }
+    }
+
     /**
-     * 释放 Redis 预扣库存和一人一单标记。只在 MQ 发送失败或 CREATED 订单关闭时调用，已支付订单不会释放。
+     * 原子释放 Redis 预扣库存和一人一单标记，按 orderId 幂等。
      */
-    private void releaseRedisSeckill(Long voucherId, Long userId) {
-        stringRedisTemplate.opsForValue().increment(RedisConstants.SECKILL_STOCK_KEY + voucherId);
-        stringRedisTemplate.opsForSet().remove(RedisConstants.SECKILL_ORDER_KEY + voucherId, userId.toString());
+    private void releaseRedisSeckill(Long orderId, Long voucherId, Long userId) {
+        stringRedisTemplate.execute(
+                RELEASE_STOCK_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString(),
+                orderId.toString()
+        );
     }
 }
