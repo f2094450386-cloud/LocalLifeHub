@@ -58,10 +58,10 @@ ai:
       base-url: ${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       api-key: ${QWEN_API_KEY:}
       model: ${QWEN_MODEL:qwen-plus}
-    minimax:
-      base-url: ${MINIMAX_BASE_URL:https://api.minimaxi.com/v1}
-      api-key: ${MINIMAX_API_KEY:}
-      model: ${MINIMAX_MODEL:MiniMax-M2.7}
+    xiaomi:
+      base-url: ${XIAOMI_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
+      api-key: ${XIAOMI_API_KEY:}
+      model: ${XIAOMI_MODEL:mimo-v2.5-pro}
     timeout-ms: ${AI_CUSTOMER_SERVICE_TIMEOUT_MS:10000}
     max-memory-messages: ${AI_CUSTOMER_SERVICE_MAX_MEMORY_MESSAGES:20}
     stream-timeout-ms: ${AI_CUSTOMER_SERVICE_STREAM_TIMEOUT_MS:60000}
