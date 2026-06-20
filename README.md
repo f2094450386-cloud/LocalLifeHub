@@ -22,7 +22,8 @@
 - 一致性补偿：`tb_voucher_order_task` 本地任务表记录 MQ 投递、消费和失败状态，定时补偿并支持人工处理。
 - 未支付订单超时关闭：RocketMQ 延迟消息 + Spring Task 兜底扫描，幂等关闭订单并恢复库存。
 - 通用限流：`@RateLimit` 注解，Redis ZSet + Lua 实现滑动窗口限流。
-- AI 客服：LangChain4j 接入 OpenAI-compatible 模型，Redis 保存会话记忆，Function Calling 查询商户和优惠券数据。
+- 安全边界：方法级管理员白名单、登录态上传、用户隔离的图片删除、验证码一次性消费。
+- AI 客服：LangChain4j 多模型可切换（DeepSeek / Qwen / MiMo），Redis 会话记忆，知识库规则检索，Function Calling 查询商户和优惠券。
 
 ## 本地环境
 
@@ -47,9 +48,10 @@ docker compose up -d mysql redis rocketmq-namesrv rocketmq-broker
 ```powershell
 Get-Content -Raw .\sql\20260512_add_voucher_order_task.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
 Get-Content -Raw .\sql\20260512_adjust_voucher_order_active_unique_index.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
+Get-Content -Raw .\sql\20260611_add_voucher_order_redis_release_status.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
 ```
 
-详细学习文档在本地 `docs` 目录，不随仓库发布。
+详细学习文档在本地 `docs` 目录，默认不随仓库发布；仅保留精简面试主线 `docs/learning/interview-mainline.md` 作为公开版项目讲解。
 
 ## 启动方式
 
@@ -89,13 +91,19 @@ $env:XIAOMI_MODEL="mimo-v2.5-pro"
 
 Spring Boot 不会自动读取 `.env` 文件。IntelliJ IDEA 用户推荐装 EnvFile 插件指向 `.env`；命令行用户启动前手动 export 以上变量。修改 `AI_ACTIVE` 切换模型后需要重启 Spring Boot，普通环境变量不支持运行时热更新。
 
+管理写接口通过 `ADMIN_USER_IDS` 配置管理员用户 ID，逗号分隔。默认配置不授予任何管理员；本地 profile 为方便演示默认包含用户 `1`：
+
+```powershell
+$env:ADMIN_USER_IDS="1,2"
+```
+
 ## 接口验证
 
 核心接口 curl 示例（登录/验证码、商户查询、秒杀下单、订单关闭、AI 客服、限流验证）见本地 `docs` 目录，不随仓库发布。
 
 ## 设计文档
 
-详细学习文档在本地 `docs` 目录（缓存治理、秒杀链路、一致性补偿、超时关闭、限流、AI 客服、简历版本等），不随仓库发布。
+详细学习文档在本地 `docs` 目录（缓存治理、秒杀链路、一致性补偿、超时关闭、限流、AI 客服、简历版本等），默认不随仓库发布。公开版面试主线见 `docs/learning/interview-mainline.md`。
 
 ## 常见问题
 
@@ -113,6 +121,12 @@ mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 
 ```powershell
 Get-Content -Raw .\sql\20260512_add_voucher_order_task.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
+```
+
+如果启动时报 `tb_voucher_order.redis_released` 不存在，还需要执行：
+
+```powershell
+Get-Content -Raw .\sql\20260611_add_voucher_order_redis_release_status.sql | docker exec -i locallifehub-mysql mysql -uroot -plocallifehub_root hmdp
 ```
 
 ### 中文响应在 Windows PowerShell 显示乱码
@@ -152,7 +166,7 @@ docker compose up -d rocketmq-dashboard
 
 - 没有真实支付网关，只实现了最小支付状态接口用于验证订单关闭。
 - 没有压测报告，因此 README 和简历文档不写 QPS 或性能提升百分比。
-- AI 客服已实现 Function Calling 和 Redis 会话记忆，RAG 知识库仍是后续扩展方向。
+- AI 客服已实现 Function Calling + Redis 会话记忆 + 关键词知识库检索，尚未升级为向量语义检索。
 
 ## 原始来源
 

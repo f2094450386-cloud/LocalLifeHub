@@ -88,7 +88,11 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             }
         } else {
             //如果已经点赞 取消点赞
-            boolean isSuccess = update().setSql("liked=liked-1").eq("id", id).update();
+            boolean isSuccess = update()
+                    .setSql("liked=liked-1")
+                    .eq("id", id)
+                    .gt("liked", 0)
+                    .update();
             //数据库-1
             if (isSuccess){
                 stringRedisTemplate.opsForZSet().remove(key,userId.toString());
@@ -102,7 +106,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     public Result queryBlogLikesById(Long id) {
         String key = RedisConstants.BLOG_LIKED_KEY + id;
         //查询top5的点赞用户
-        Set<String> top5 = stringRedisTemplate.opsForZSet().range(key, 0, 6);
+        Set<String> top5 = stringRedisTemplate.opsForZSet().range(key, 0, 4);
         if (top5==null||top5.isEmpty()){
             return Result.ok(Collections.emptyList());
         }

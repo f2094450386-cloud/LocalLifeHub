@@ -6,6 +6,7 @@ import com.hmdp.dto.OrderTimeoutMessage;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.dto.VoucherOrderMessage;
+import com.hmdp.dto.VoucherOrderStatusDTO;
 import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.entity.VoucherOrderTask;
@@ -32,9 +33,11 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.Collections;
 import java.util.List;
 
@@ -65,6 +68,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Value("${seckill.order-timeout.minutes:15}")
     private Long orderTimeoutMinutes;
 
+    @Value("${seckill.release-marker-ttl-seconds:604800}")
+    private Long releaseMarkerTtlSeconds;
+
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     private static final DefaultRedisScript<Long> RELEASE_STOCK_SCRIPT;
 
@@ -85,6 +91,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     public Result seckillVoucher(Long voucherId) {
         UserDTO user = UserHolder.getUser();
         Long userId = user.getId();
+        if (!ensureSeckillMetadata(voucherId)) {
+            return Result.fail("秒杀活动不存在或配置不完整");
+        }
         Long orderId = redisIdWorker.nextId("order");
 
         Long result = stringRedisTemplate.execute(
@@ -93,9 +102,24 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 voucherId.toString(),
                 userId.toString()
         );
-        int code = result == null ? 1 : result.intValue();
+        if (result == null) {
+            return Result.fail("秒杀服务繁忙，请稍后重试");
+        }
+        int code = result.intValue();
         if (code != 0) {
-            return Result.fail(code == 1 ? "库存不足" : "禁止重复下单");
+            if (code == 1) {
+                return Result.fail("库存不足");
+            }
+            if (code == 2) {
+                return Result.fail("禁止重复下单");
+            }
+            if (code == 4) {
+                return Result.fail("秒杀活动尚未开始");
+            }
+            if (code == 5) {
+                return Result.fail("秒杀活动已经结束");
+            }
+            return Result.fail("秒杀活动配置不可用");
         }
 
         VoucherOrderTask task;
@@ -117,10 +141,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             SendResult sendResult = rocketMQTemplate.syncSend(RocketMqConstants.VOUCHER_ORDER_TOPIC, message);
             if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
                 voucherOrderTaskService.markFailed(orderId, "MQ send status: " + sendResult.getSendStatus(), false);
-                releaseRedisSeckill(orderId, voucherId, userId);
                 log.error("秒杀订单消息发送失败，orderId={}, userId={}, voucherId={}, sendStatus={}",
                         orderId, userId, voucherId, sendResult.getSendStatus());
-                return Result.fail("订单排队失败，请稍后重试");
+                return Result.ok(orderId);
             }
             try {
                 voucherOrderTaskService.markSent(orderId, sendResult.getMsgId());
@@ -132,7 +155,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 交给 VoucherOrderTaskCompensator 重投，超过上限且订单不存在时再释放
             voucherOrderTaskService.markFailed(orderId, e.getMessage(), false);
             log.error("秒杀订单消息发送异常，orderId={}, userId={}, voucherId={}", orderId, userId, voucherId, e);
-            return Result.fail("订单排队失败，请稍后重试");
+            return Result.ok(orderId);
         }
 
         return Result.ok(orderId);
@@ -193,12 +216,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void handleVoucherOrderMessage(VoucherOrderMessage message) {
+        if (!voucherOrderTaskService.claimForConsumption(message.getOrderId())) {
+            log.info("秒杀订单任务未抢占到消费权，跳过消息，orderId={}", message.getOrderId());
+            return;
+        }
         VoucherOrder voucherOrder = new VoucherOrder();
         voucherOrder.setId(message.getOrderId());
         voucherOrder.setUserId(message.getUserId());
         voucherOrder.setVoucherId(message.getVoucherId());
         createVoucherOrder(voucherOrder);
-        voucherOrderTaskService.markConsumed(message.getOrderId());
+        if (!voucherOrderTaskService.markConsumed(message.getOrderId())) {
+            throw new IllegalStateException("秒杀订单任务标记消费完成失败，orderId=" + message.getOrderId());
+        }
         TransactionUtils.afterCommit(() -> sendOrderTimeoutMessageSilently(voucherOrder));
     }
 
@@ -214,9 +243,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return false;
         }
         if (Integer.valueOf(VoucherOrderStatus.CLOSED).equals(voucherOrder.getStatus())) {
-            releaseRedisSeckill(orderId, voucherOrder.getVoucherId(), voucherOrder.getUserId());
-            log.info("未支付订单已关闭，补偿执行 Redis 幂等释放，orderId={}, userId={}, voucherId={}",
-                    orderId, voucherOrder.getUserId(), voucherOrder.getVoucherId());
+            if (!Integer.valueOf(1).equals(voucherOrder.getRedisReleased())) {
+                releaseClosedOrderRedis(voucherOrder);
+            }
             return false;
         }
         if (!Integer.valueOf(VoucherOrderStatus.CREATED).equals(voucherOrder.getStatus())) {
@@ -227,7 +256,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         boolean closed = update(new LambdaUpdateWrapper<VoucherOrder>()
                 .eq(VoucherOrder::getId, orderId)
                 .eq(VoucherOrder::getStatus, VoucherOrderStatus.CREATED)
-                .set(VoucherOrder::getStatus, VoucherOrderStatus.CLOSED));
+                .set(VoucherOrder::getStatus, VoucherOrderStatus.CLOSED)
+                .set(VoucherOrder::getRedisReleased, 0));
         if (!closed) {
             return false;
         }
@@ -242,7 +272,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
 
         TransactionUtils.afterCommit(() -> {
-            releaseRedisSeckill(orderId, voucherOrder.getVoucherId(), voucherOrder.getUserId());
+            releaseClosedOrderRedis(voucherOrder);
             log.info("未支付订单已关闭并恢复库存，orderId={}, userId={}, voucherId={}",
                     orderId, voucherOrder.getUserId(), voucherOrder.getVoucherId());
         });
@@ -262,6 +292,54 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         for (VoucherOrder order : orders) {
             voucherOrderServiceProxy.closeUnpaidOrder(order.getId());
         }
+    }
+
+    @Override
+    public void reconcileClosedOrderRedis(int limit) {
+        int queryLimit = Math.max(1, limit);
+        List<VoucherOrder> orders = lambdaQuery()
+                .eq(VoucherOrder::getStatus, VoucherOrderStatus.CLOSED)
+                .and(wrapper -> wrapper.eq(VoucherOrder::getRedisReleased, 0)
+                        .or()
+                        .isNull(VoucherOrder::getRedisReleased))
+                .orderByAsc(VoucherOrder::getUpdateTime)
+                .last("LIMIT " + queryLimit)
+                .list();
+        for (VoucherOrder order : orders) {
+            try {
+                releaseClosedOrderRedis(order);
+            } catch (Exception e) {
+                log.error("补偿释放关闭订单 Redis 资格失败，orderId={}", order.getId(), e);
+            }
+        }
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void markRedisReleased(Long orderId) {
+        update(new LambdaUpdateWrapper<VoucherOrder>()
+                .eq(VoucherOrder::getId, orderId)
+                .eq(VoucherOrder::getStatus, VoucherOrderStatus.CLOSED)
+                .and(wrapper -> wrapper.eq(VoucherOrder::getRedisReleased, 0)
+                        .or()
+                        .isNull(VoucherOrder::getRedisReleased))
+                .set(VoucherOrder::getRedisReleased, 1));
+    }
+
+    @Override
+    public Long releaseRedisReservation(Long orderId, Long voucherId, Long userId) {
+        Long result = stringRedisTemplate.execute(
+                RELEASE_STOCK_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString(),
+                orderId.toString(),
+                releaseMarkerTtlSeconds.toString()
+        );
+        if (result == null) {
+            throw new IllegalStateException("Redis 秒杀资格释放结果为空，orderId=" + orderId);
+        }
+        return result;
     }
 
     @Override
@@ -296,6 +374,34 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         return Result.ok(orderId);
     }
 
+    @Override
+    public Result queryOrderStatus(Long orderId) {
+        Long currentUserId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        if (order != null) {
+            if (!currentUserId.equals(order.getUserId())) {
+                return Result.fail("只能查询自己的订单");
+            }
+            VoucherOrderStatusDTO status = new VoucherOrderStatusDTO();
+            status.setOrderId(orderId);
+            status.setOrderStatus(order.getStatus());
+            status.setState(orderState(order.getStatus()));
+            status.setMessage("订单已落库");
+            return Result.ok(status);
+        }
+
+        VoucherOrderTask task = voucherOrderTaskService.queryByOrderId(orderId);
+        if (task == null || !currentUserId.equals(task.getUserId())) {
+            return Result.fail("订单不存在");
+        }
+        VoucherOrderStatusDTO status = new VoucherOrderStatusDTO();
+        status.setOrderId(orderId);
+        status.setTaskStatus(task.getStatus());
+        status.setState(taskState(task.getStatus()));
+        status.setMessage(task.getFailReason());
+        return Result.ok(status);
+    }
+
     private void sendOrderTimeoutMessage(VoucherOrder voucherOrder) {
         OrderTimeoutMessage timeoutMessage = new OrderTimeoutMessage();
         timeoutMessage.setOrderId(voucherOrder.getId());
@@ -328,12 +434,59 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      * 原子释放 Redis 预扣库存和一人一单标记，按 orderId 幂等。
      */
     private void releaseRedisSeckill(Long orderId, Long voucherId, Long userId) {
-        stringRedisTemplate.execute(
-                RELEASE_STOCK_SCRIPT,
-                Collections.emptyList(),
-                voucherId.toString(),
-                userId.toString(),
-                orderId.toString()
+        releaseRedisReservation(orderId, voucherId, userId);
+    }
+
+    private void releaseClosedOrderRedis(VoucherOrder order) {
+        Long result = releaseRedisReservation(order.getId(), order.getVoucherId(), order.getUserId());
+        voucherOrderServiceProxy.markRedisReleased(order.getId());
+        log.info("关闭订单 Redis 资格释放完成，orderId={}, userId={}, voucherId={}, result={}",
+                order.getId(), order.getUserId(), order.getVoucherId(), result);
+    }
+
+    private boolean ensureSeckillMetadata(Long voucherId) {
+        String beginKey = RedisConstants.SECKILL_BEGIN_TIME_KEY + voucherId;
+        String endKey = RedisConstants.SECKILL_END_TIME_KEY + voucherId;
+        Boolean beginExists = stringRedisTemplate.hasKey(beginKey);
+        Boolean endExists = stringRedisTemplate.hasKey(endKey);
+        if (Boolean.TRUE.equals(beginExists) && Boolean.TRUE.equals(endExists)) {
+            return true;
+        }
+        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+        if (voucher == null || voucher.getBeginTime() == null || voucher.getEndTime() == null) {
+            return false;
+        }
+        stringRedisTemplate.opsForValue().set(
+                beginKey,
+                String.valueOf(voucher.getBeginTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
         );
+        stringRedisTemplate.opsForValue().set(
+                endKey,
+                String.valueOf(voucher.getEndTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
+        );
+        return true;
+    }
+
+    private String orderState(Integer status) {
+        if (Integer.valueOf(VoucherOrderStatus.CREATED).equals(status)) {
+            return "CREATED";
+        }
+        if (Integer.valueOf(VoucherOrderStatus.PAID).equals(status)) {
+            return "PAID";
+        }
+        if (Integer.valueOf(VoucherOrderStatus.CLOSED).equals(status)) {
+            return "CLOSED";
+        }
+        return "ORDERED";
+    }
+
+    private String taskState(String status) {
+        if (com.hmdp.utils.VoucherOrderTaskStatus.MANUAL_REVIEW.equals(status)) {
+            return "MANUAL_REVIEW";
+        }
+        if (com.hmdp.utils.VoucherOrderTaskStatus.RESOLVED.equals(status)) {
+            return "RELEASED";
+        }
+        return "QUEUING";
     }
 }

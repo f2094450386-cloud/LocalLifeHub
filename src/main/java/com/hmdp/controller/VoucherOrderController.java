@@ -5,6 +5,7 @@ import com.hmdp.annotation.RateLimit;
 import com.hmdp.dto.Result;
 import com.hmdp.service.IVoucherOrderService;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -38,5 +39,10 @@ public class VoucherOrderController {
     @PostMapping("pay/{id}")
     public Result payOrder(@PathVariable("id") Long orderId) {
         return voucherOrderService.payOrder(orderId);
+    }
+
+    @GetMapping("{id}/status")
+    public Result queryOrderStatus(@PathVariable("id") Long orderId) {
+        return voucherOrderService.queryOrderStatus(orderId);
     }
 }

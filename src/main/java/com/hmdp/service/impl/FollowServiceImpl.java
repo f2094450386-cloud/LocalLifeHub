@@ -59,7 +59,7 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             );
             if (isSuccess) {
                 String key="follows:"+id;
-                stringRedisTemplate.opsForSet().remove(key,followUserId);
+                stringRedisTemplate.opsForSet().remove(key,followUserId.toString());
             }
         }
         return Result.ok();

@@ -73,6 +73,11 @@ public class VoucherOrder implements Serializable {
     private LocalDateTime refundTime;
 
     /**
+     * 关闭订单后 Redis 预扣资格是否已经释放，0：否；1：是。
+     */
+    private Integer redisReleased;
+
+    /**
      * 更新时间
      */
     private LocalDateTime updateTime;

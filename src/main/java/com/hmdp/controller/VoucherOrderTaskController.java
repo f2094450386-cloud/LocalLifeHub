@@ -1,5 +1,6 @@
 package com.hmdp.controller;
 
+import com.hmdp.annotation.AdminOnly;
 import com.hmdp.dto.Result;
 import com.hmdp.service.IManualReviewService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,6 +14,7 @@ import javax.annotation.Resource;
 
 @RestController
 @RequestMapping("/voucher-order-task")
+@AdminOnly
 public class VoucherOrderTaskController {
 
     @Resource

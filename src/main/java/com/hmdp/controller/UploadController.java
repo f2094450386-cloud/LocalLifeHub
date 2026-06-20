@@ -1,15 +1,21 @@
 package com.hmdp.controller;
 
-import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.StrUtil;
 import com.hmdp.dto.Result;
-import com.hmdp.utils.SystemConstants;
+import com.hmdp.dto.UserDTO;
+import com.hmdp.security.AdminAccessPolicy;
+import com.hmdp.utils.UploadFilePolicy;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.File;
 import java.io.IOException;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.UUID;
 
 @Slf4j
@@ -17,47 +23,83 @@ import java.util.UUID;
 @RequestMapping("upload")
 public class UploadController {
 
+    private final Path uploadRoot;
+    private final long maxImageBytes;
+    private final long maxImagePixels;
+    private final AdminAccessPolicy adminAccessPolicy;
+
+    public UploadController(
+            @Value("${app.upload.image-dir:src/main/resources/nginx-1.18.0/html/hmdp/imgs}") String imageDir,
+            @Value("${app.upload.max-image-bytes:5242880}") long maxImageBytes,
+            @Value("${app.upload.max-image-pixels:40000000}") long maxImagePixels,
+            AdminAccessPolicy adminAccessPolicy
+    ) {
+        this.uploadRoot = Paths.get(imageDir).toAbsolutePath().normalize();
+        this.maxImageBytes = maxImageBytes;
+        this.maxImagePixels = maxImagePixels;
+        this.adminAccessPolicy = adminAccessPolicy;
+    }
+
     @PostMapping("blog")
     public Result uploadImage(@RequestParam("file") MultipartFile image) {
+        if (image == null || image.isEmpty()) {
+            return Result.fail("图片不能为空");
+        }
+        if (image.getSize() > maxImageBytes) {
+            return Result.fail("图片大小不能超过 " + maxImageBytes + " 字节");
+        }
         try {
-            // 获取原始文件名称
+            BufferedImage decodedImage = ImageIO.read(image.getInputStream());
+            if (decodedImage == null) {
+                return Result.fail("上传内容不是有效图片");
+            }
+            long pixels = (long) decodedImage.getWidth() * decodedImage.getHeight();
+            if (pixels <= 0 || pixels > maxImagePixels) {
+                return Result.fail("图片尺寸过大");
+            }
             String originalFilename = image.getOriginalFilename();
-            // 生成新文件名
-            String fileName = createNewFileName(originalFilename);
-            // 保存文件
-            image.transferTo(new File(SystemConstants.IMAGE_UPLOAD_DIR, fileName));
-            // 返回结果
+            String suffix = UploadFilePolicy.validateExtension(originalFilename);
+            String fileName = createNewFileName(suffix);
+            Path target = UploadFilePolicy.resolveBlogImage(uploadRoot, fileName);
+            Files.createDirectories(target.getParent());
+            image.transferTo(target);
             log.debug("文件上传成功，{}", fileName);
             return Result.ok(fileName);
+        } catch (IllegalArgumentException e) {
+            return Result.fail(e.getMessage());
         } catch (IOException e) {
             throw new RuntimeException("文件上传失败", e);
         }
     }
 
-    @GetMapping("/blog/delete")
+    @DeleteMapping("/blog")
     public Result deleteBlogImg(@RequestParam("name") String filename) {
-        File file = new File(SystemConstants.IMAGE_UPLOAD_DIR, filename);
-        if (file.isDirectory()) {
-            return Result.fail("错误的文件名称");
+        UserDTO user = UserHolder.getUser();
+        try {
+            Path target = UploadFilePolicy.resolveOwnedBlogImage(
+                    uploadRoot,
+                    filename,
+                    user.getId(),
+                    adminAccessPolicy.isAdmin(user.getId())
+            );
+            if (Files.isDirectory(target)) {
+                return Result.fail("错误的文件名称");
+            }
+            Files.deleteIfExists(target);
+            return Result.ok();
+        } catch (IllegalArgumentException e) {
+            return Result.fail(e.getMessage());
+        } catch (IOException e) {
+            throw new RuntimeException("文件删除失败", e);
         }
-        FileUtil.del(file);
-        return Result.ok();
     }
 
-    private String createNewFileName(String originalFilename) {
-        // 获取后缀
-        String suffix = StrUtil.subAfter(originalFilename, ".", true);
-        // 生成目录
+    private String createNewFileName(String suffix) {
+        Long userId = UserHolder.getUser().getId();
         String name = UUID.randomUUID().toString();
         int hash = name.hashCode();
         int d1 = hash & 0xF;
         int d2 = (hash >> 4) & 0xF;
-        // 判断目录是否存在
-        File dir = new File(SystemConstants.IMAGE_UPLOAD_DIR, StrUtil.format("/blogs/{}/{}", d1, d2));
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-        // 生成文件名
-        return StrUtil.format("/blogs/{}/{}/{}.{}", d1, d2, name, suffix);
+        return String.format("/blogs/%d/%d/%d/%s.%s", userId, d1, d2, name, suffix);
     }
 }

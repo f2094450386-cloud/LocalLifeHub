@@ -6,20 +6,15 @@ import com.hmdp.entity.VoucherOrderTask;
 import com.hmdp.service.IManualReviewService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.service.IVoucherOrderTaskService;
-import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RocketMqConstants;
 import com.hmdp.utils.VoucherOrderTaskStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
-import java.util.Collections;
 import java.util.List;
 
 @Slf4j
@@ -32,17 +27,6 @@ public class ManualReviewServiceImpl implements IManualReviewService {
     private IVoucherOrderService voucherOrderService;
     @Resource
     private RocketMQTemplate rocketMQTemplate;
-    @Resource
-    private StringRedisTemplate stringRedisTemplate;
-
-    private static final DefaultRedisScript<Long> RELEASE_STOCK_SCRIPT;
-
-    static {
-        RELEASE_STOCK_SCRIPT = new DefaultRedisScript<>();
-        RELEASE_STOCK_SCRIPT.setLocation(new ClassPathResource("release_stock.lua"));
-        RELEASE_STOCK_SCRIPT.setResultType(Long.class);
-    }
-
     @Override
     public Result listVoucherOrderTasks(Integer limit) {
         int queryLimit = limit == null ? 50 : Math.max(1, Math.min(limit, 200));
@@ -63,22 +47,32 @@ public class ManualReviewServiceImpl implements IManualReviewService {
         if (!VoucherOrderTaskStatus.MANUAL_REVIEW.equals(task.getStatus())) {
             return Result.fail("只有 MANUAL_REVIEW 任务允许人工重投");
         }
-
-        VoucherOrderMessage message = new VoucherOrderMessage();
-        message.setTaskId(task.getId());
-        message.setOrderId(task.getOrderId());
-        message.setUserId(task.getUserId());
-        message.setVoucherId(task.getVoucherId());
-        SendResult sendResult = rocketMQTemplate.syncSend(RocketMqConstants.VOUCHER_ORDER_TOPIC, message);
-        if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
-            voucherOrderTaskService.markFailed(task.getOrderId(), "manual retry MQ send status: " + sendResult.getSendStatus(), true);
-            return Result.fail("人工重投失败：" + sendResult.getSendStatus());
+        if (!voucherOrderTaskService.claimManualRetry(taskId)) {
+            return Result.fail("任务状态已变化，请刷新后重试");
         }
 
-        voucherOrderTaskService.markSent(task.getOrderId(), sendResult.getMsgId(), true);
-        log.warn("人工重投秒杀订单任务，taskId={}, orderId={}, userId={}, voucherId={}, messageId={}",
-                task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId(), sendResult.getMsgId());
-        return Result.ok(sendResult.getMsgId());
+        try {
+            VoucherOrderMessage message = new VoucherOrderMessage();
+            message.setTaskId(task.getId());
+            message.setOrderId(task.getOrderId());
+            message.setUserId(task.getUserId());
+            message.setVoucherId(task.getVoucherId());
+            SendResult sendResult = rocketMQTemplate.syncSend(RocketMqConstants.VOUCHER_ORDER_TOPIC, message);
+            if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
+                log.warn("人工重投发送结果待确认，保留 PROCESSING 等待消费或补偿，taskId={}, orderId={}, sendStatus={}",
+                        taskId, task.getOrderId(), sendResult.getSendStatus());
+                return Result.ok(taskId);
+            }
+
+            voucherOrderTaskService.markSent(task.getOrderId(), sendResult.getMsgId(), false);
+            log.warn("人工重投秒杀订单任务，taskId={}, orderId={}, userId={}, voucherId={}, messageId={}",
+                    task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId(), sendResult.getMsgId());
+            return Result.ok(sendResult.getMsgId());
+        } catch (Exception e) {
+            log.warn("人工重投发送结果不确定，保留 PROCESSING 等待消费或补偿，taskId={}, orderId={}, error={}",
+                    taskId, task.getOrderId(), e.getMessage());
+            return Result.ok(taskId);
+        }
     }
 
     @Override
@@ -93,20 +87,28 @@ public class ManualReviewServiceImpl implements IManualReviewService {
         if (!VoucherOrderTaskStatus.MANUAL_REVIEW.equals(task.getStatus())) {
             return Result.fail("只有 MANUAL_REVIEW 任务允许人工释放 Redis 资格");
         }
+        if (!voucherOrderTaskService.claimForRelease(taskId, VoucherOrderTaskStatus.MANUAL_REVIEW)) {
+            return Result.fail("任务状态已变化，请刷新后重试");
+        }
         if (voucherOrderService.getById(task.getOrderId()) != null) {
+            voucherOrderTaskService.markConsumed(task.getOrderId());
             return Result.fail("订单已存在，不能释放 Redis 资格");
         }
 
-        stringRedisTemplate.execute(
-                RELEASE_STOCK_SCRIPT,
-                Collections.emptyList(),
-                task.getVoucherId().toString(),
-                task.getUserId().toString(),
-                task.getOrderId().toString()
-        );
-        voucherOrderTaskService.markResolved(taskId, "manual released redis qualification");
-        log.warn("人工释放秒杀 Redis 资格，taskId={}, orderId={}, userId={}, voucherId={}",
-                task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());
-        return Result.ok(taskId);
+        try {
+            Long releaseResult = voucherOrderService.releaseRedisReservation(
+                    task.getOrderId(),
+                    task.getVoucherId(),
+                    task.getUserId()
+            );
+            voucherOrderTaskService.markResolved(taskId, "manual released redis qualification, result " + releaseResult);
+            log.warn("人工释放秒杀 Redis 资格，taskId={}, orderId={}, userId={}, voucherId={}",
+                    task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());
+            return Result.ok(taskId);
+        } catch (Exception e) {
+            voucherOrderTaskService.markManualReview(taskId, "manual release failed: " + e.getMessage());
+            log.error("人工释放秒杀 Redis 资格失败，taskId={}, orderId={}", taskId, task.getOrderId(), e);
+            return Result.fail("Redis 资格释放失败");
+        }
     }
 }

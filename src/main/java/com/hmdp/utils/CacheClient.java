@@ -7,12 +7,18 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -21,12 +27,27 @@ import static com.hmdp.utils.RedisConstants.CACHE_NULL_TTL;
 import static com.hmdp.utils.RedisConstants.CACHE_RANDOM_TTL_SECONDS;
 import static com.hmdp.utils.RedisConstants.LOCK_SHOP_KEY;
 import static com.hmdp.utils.RedisConstants.LOCK_SHOP_TTL;
+import static com.hmdp.utils.RedisConstants.LOCK_SHOP_WAIT_MILLIS;
 
 @Slf4j
 @Component
 public class CacheClient {
 
-    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = new ThreadPoolExecutor(
+            4,
+            4,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(100),
+            new ThreadPoolExecutor.AbortPolicy()
+    );
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
 
     private final StringRedisTemplate stringRedisTemplate;
 
@@ -92,32 +113,42 @@ public class CacheClient {
         }
 
         String lockKey = lockKeyPrefix + id;
-        boolean locked = false;
-        try {
-            locked = tryLock(lockKey);
-            if (!locked) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LOCK_SHOP_WAIT_MILLIS);
+        while (true) {
+            String lockToken = tryLock(lockKey);
+            if (lockToken == null) {
+                String cachedDuringWait = stringRedisTemplate.opsForValue().get(key);
+                if (StrUtil.isNotBlank(cachedDuringWait)) {
+                    return JSONUtil.toBean(cachedDuringWait, type);
+                }
+                if (cachedDuringWait != null) {
+                    return null;
+                }
+                if (System.nanoTime() >= deadlineNanos) {
+                    throw new IllegalStateException("等待缓存重建超时，key=" + key);
+                }
                 sleepQuietly(50);
-                return queryWithMutex(keyPrefix, lockKeyPrefix, id, type, dbFallback, time, unit);
+                continue;
             }
 
-            String cachedAgain = stringRedisTemplate.opsForValue().get(key);
-            if (StrUtil.isNotBlank(cachedAgain)) {
-                return JSONUtil.toBean(cachedAgain, type);
-            }
-            if (cachedAgain != null) {
-                return null;
-            }
+            try {
+                String cachedAgain = stringRedisTemplate.opsForValue().get(key);
+                if (StrUtil.isNotBlank(cachedAgain)) {
+                    return JSONUtil.toBean(cachedAgain, type);
+                }
+                if (cachedAgain != null) {
+                    return null;
+                }
 
-            R data = dbFallback.apply(id);
-            if (data == null) {
-                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
-                return null;
-            }
-            set(key, data, time, unit);
-            return data;
-        } finally {
-            if (locked) {
-                unlock(lockKey);
+                R data = dbFallback.apply(id);
+                if (data == null) {
+                    stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                    return null;
+                }
+                set(key, data, time, unit);
+                return data;
+            } finally {
+                unlock(lockKey, lockToken);
             }
         }
     }
@@ -158,21 +189,27 @@ public class CacheClient {
         }
 
         String lockKey = lockKeyPrefix + id;
-        if (tryLock(lockKey)) {
-            CACHE_REBUILD_EXECUTOR.submit(() -> {
-                try {
-                    R freshData = dbFallback.apply(id);
-                    if (freshData == null) {
-                        stringRedisTemplate.delete(key);
-                    } else {
-                        setWithLogicalExpire(key, freshData, time, unit);
+        String lockToken = tryLock(lockKey);
+        if (lockToken != null) {
+            try {
+                CACHE_REBUILD_EXECUTOR.submit(() -> {
+                    try {
+                        R freshData = dbFallback.apply(id);
+                        if (freshData == null) {
+                            stringRedisTemplate.delete(key);
+                        } else {
+                            setWithLogicalExpire(key, freshData, time, unit);
+                        }
+                    } catch (Exception e) {
+                        log.error("rebuild logical cache failed, key={}", key, e);
+                    } finally {
+                        unlock(lockKey, lockToken);
                     }
-                } catch (Exception e) {
-                    log.error("rebuild logical cache failed, key={}", key, e);
-                } finally {
-                    unlock(lockKey);
-                }
-            });
+                });
+            } catch (RejectedExecutionException e) {
+                unlock(lockKey, lockToken);
+                log.warn("cache rebuild queue is full, key={}", key);
+            }
         }
         return data;
     }
@@ -181,13 +218,18 @@ public class CacheClient {
         stringRedisTemplate.delete(key);
     }
 
-    private boolean tryLock(String key) {
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
-        return BooleanUtil.isTrue(flag);
+    private String tryLock(String key) {
+        String token = UUID.randomUUID().toString();
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, token, LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag) ? token : null;
     }
 
-    private void unlock(String key) {
-        stringRedisTemplate.delete(key);
+    private void unlock(String key, String token) {
+        stringRedisTemplate.execute(
+                UNLOCK_SCRIPT,
+                Collections.singletonList(key),
+                token
+        );
     }
 
     private long randomTtl(Long time, TimeUnit unit) {

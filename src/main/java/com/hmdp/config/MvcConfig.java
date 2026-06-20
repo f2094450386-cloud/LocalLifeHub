@@ -2,8 +2,8 @@ package com.hmdp.config;
 
 import com.hmdp.interceptor.LoginInterceptor;
 import com.hmdp.interceptor.RefreshTokenInterceptor;
-import org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration;
-import org.springframework.cache.annotation.CacheConfig;
+import com.hmdp.interceptor.AdminAuthorizationInterceptor;
+import com.hmdp.security.AdminAccessPolicy;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
@@ -21,6 +21,8 @@ import javax.annotation.Resource;
 public class MvcConfig implements WebMvcConfigurer {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private AdminAccessPolicy adminAccessPolicy;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -32,9 +34,12 @@ public class MvcConfig implements WebMvcConfigurer {
                         , "/blog/hot"
                         , "/shop/**"
                         , "/shop-type/**"
-                        , "/upload/**"
                         , "/voucher/**"
                 )
+                .order(2);
+        registry
+                .addInterceptor(new AdminAuthorizationInterceptor(adminAccessPolicy))
+                .addPathPatterns("/**")
                 .order(1);
         //Token续命拦截器
         registry

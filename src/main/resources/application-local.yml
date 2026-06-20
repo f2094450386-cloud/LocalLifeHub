@@ -3,6 +3,15 @@
 server:
   port: ${SERVER_PORT:8081}
 
+app:
+  security:
+    admin-user-ids: ${ADMIN_USER_IDS:1}
+    log-verification-code: ${LOG_VERIFICATION_CODE:true}
+  upload:
+    image-dir: ${IMAGE_UPLOAD_DIR:src/main/resources/nginx-1.18.0/html/hmdp/imgs}
+    max-image-bytes: ${MAX_IMAGE_BYTES:5242880}
+    max-image-pixels: ${MAX_IMAGE_PIXELS:40000000}
+
 spring:
   datasource:
     # Matches docker-compose.yml MySQL defaults.
@@ -24,6 +33,7 @@ rocketmq:
   dashboard-url: ${ROCKETMQ_DASHBOARD_URL:http://127.0.0.1:8088}
 
 seckill:
+  release-marker-ttl-seconds: ${SECKILL_RELEASE_MARKER_TTL_SECONDS:604800}
   order-task:
     compensate-interval-ms: ${SECKILL_TASK_COMPENSATE_INTERVAL_MS:30000}
     compensate-limit: ${SECKILL_TASK_COMPENSATE_LIMIT:50}

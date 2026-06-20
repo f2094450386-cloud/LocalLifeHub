@@ -57,6 +57,10 @@ public class VoucherOrderTaskServiceImpl extends ServiceImpl<VoucherOrderTaskMap
     public boolean markSent(Long orderId, String messageId, boolean increaseRetry) {
         LambdaUpdateWrapper<VoucherOrderTask> wrapper = new LambdaUpdateWrapper<VoucherOrderTask>()
                 .eq(VoucherOrderTask::getOrderId, orderId)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.PENDING,
+                        VoucherOrderTaskStatus.FAILED,
+                        VoucherOrderTaskStatus.PROCESSING)
                 .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.SENT)
                 .set(VoucherOrderTask::getMessageId, messageId)
                 .set(VoucherOrderTask::getLastSendTime, LocalDateTime.now())
@@ -72,6 +76,9 @@ public class VoucherOrderTaskServiceImpl extends ServiceImpl<VoucherOrderTaskMap
     public boolean markConsumed(Long orderId) {
         return update(new LambdaUpdateWrapper<VoucherOrderTask>()
                 .eq(VoucherOrderTask::getOrderId, orderId)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.CONSUMING,
+                        VoucherOrderTaskStatus.RELEASING)
                 .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.CONSUMED)
                 .set(VoucherOrderTask::getFailReason, null));
     }
@@ -80,6 +87,11 @@ public class VoucherOrderTaskServiceImpl extends ServiceImpl<VoucherOrderTaskMap
     public boolean markFailed(Long orderId, String failReason, boolean increaseRetry) {
         LambdaUpdateWrapper<VoucherOrderTask> wrapper = new LambdaUpdateWrapper<VoucherOrderTask>()
                 .eq(VoucherOrderTask::getOrderId, orderId)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.PENDING,
+                        VoucherOrderTaskStatus.SENT,
+                        VoucherOrderTaskStatus.FAILED,
+                        VoucherOrderTaskStatus.PROCESSING)
                 .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.FAILED)
                 .set(VoucherOrderTask::getFailReason, truncate(failReason))
                 .set(VoucherOrderTask::getNextRetryTime, nextRetryTime());
@@ -93,6 +105,12 @@ public class VoucherOrderTaskServiceImpl extends ServiceImpl<VoucherOrderTaskMap
     public boolean markManualReview(Long taskId, String failReason) {
         return update(new LambdaUpdateWrapper<VoucherOrderTask>()
                 .eq(VoucherOrderTask::getId, taskId)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.PENDING,
+                        VoucherOrderTaskStatus.SENT,
+                        VoucherOrderTaskStatus.FAILED,
+                        VoucherOrderTaskStatus.PROCESSING,
+                        VoucherOrderTaskStatus.RELEASING)
                 .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.MANUAL_REVIEW)
                 .set(VoucherOrderTask::getFailReason, truncate(failReason)));
     }
@@ -101,16 +119,65 @@ public class VoucherOrderTaskServiceImpl extends ServiceImpl<VoucherOrderTaskMap
     public boolean markResolved(Long taskId, String reason) {
         return update(new LambdaUpdateWrapper<VoucherOrderTask>()
                 .eq(VoucherOrderTask::getId, taskId)
-                .eq(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.MANUAL_REVIEW)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.MANUAL_REVIEW,
+                        VoucherOrderTaskStatus.RELEASING)
                 .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.RESOLVED)
                 .set(VoucherOrderTask::getFailReason, truncate(reason)));
+    }
+
+    @Override
+    public boolean claimForCompensation(Long taskId, String expectedStatus) {
+        return update(new LambdaUpdateWrapper<VoucherOrderTask>()
+                .eq(VoucherOrderTask::getId, taskId)
+                .eq(VoucherOrderTask::getStatus, expectedStatus)
+                .and(wrapper -> wrapper.le(VoucherOrderTask::getNextRetryTime, LocalDateTime.now())
+                        .or()
+                        .isNull(VoucherOrderTask::getNextRetryTime))
+                .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.PROCESSING)
+                .set(VoucherOrderTask::getNextRetryTime, nextRetryTime())
+                .setSql("retry_count = retry_count + 1"));
+    }
+
+    @Override
+    public boolean claimForConsumption(Long orderId) {
+        return update(new LambdaUpdateWrapper<VoucherOrderTask>()
+                .eq(VoucherOrderTask::getOrderId, orderId)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.PENDING,
+                        VoucherOrderTaskStatus.SENT,
+                        VoucherOrderTaskStatus.FAILED,
+                        VoucherOrderTaskStatus.PROCESSING)
+                .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.CONSUMING));
+    }
+
+    @Override
+    public boolean claimForRelease(Long taskId, String expectedStatus) {
+        return update(new LambdaUpdateWrapper<VoucherOrderTask>()
+                .eq(VoucherOrderTask::getId, taskId)
+                .eq(VoucherOrderTask::getStatus, expectedStatus)
+                .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.RELEASING));
+    }
+
+    @Override
+    public boolean claimManualRetry(Long taskId) {
+        return update(new LambdaUpdateWrapper<VoucherOrderTask>()
+                .eq(VoucherOrderTask::getId, taskId)
+                .eq(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.MANUAL_REVIEW)
+                .set(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.PROCESSING)
+                .set(VoucherOrderTask::getNextRetryTime, nextRetryTime())
+                .setSql("retry_count = retry_count + 1"));
     }
 
     @Override
     public List<VoucherOrderTask> listDueTasks(LocalDateTime now, int limit) {
         int queryLimit = Math.max(1, limit);
         return list(new LambdaQueryWrapper<VoucherOrderTask>()
-                .in(VoucherOrderTask::getStatus, VoucherOrderTaskStatus.PENDING, VoucherOrderTaskStatus.FAILED, VoucherOrderTaskStatus.SENT)
+                .in(VoucherOrderTask::getStatus,
+                        VoucherOrderTaskStatus.PENDING,
+                        VoucherOrderTaskStatus.FAILED,
+                        VoucherOrderTaskStatus.SENT,
+                        VoucherOrderTaskStatus.PROCESSING)
                 .and(wrapper -> wrapper.le(VoucherOrderTask::getNextRetryTime, now)
                         .or()
                         .isNull(VoucherOrderTask::getNextRetryTime))

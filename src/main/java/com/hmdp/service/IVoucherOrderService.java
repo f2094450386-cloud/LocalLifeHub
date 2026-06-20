@@ -50,5 +50,13 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     void closeExpiredUnpaidOrders(int limit);
 
+    void reconcileClosedOrderRedis(int limit);
+
+    void markRedisReleased(Long orderId);
+
+    Long releaseRedisReservation(Long orderId, Long voucherId, Long userId);
+
     Result payOrder(Long orderId);
+
+    Result queryOrderStatus(Long orderId);
 }

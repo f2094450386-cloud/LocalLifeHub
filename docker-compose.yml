@@ -24,6 +24,7 @@ services:
       - ./sql/20260512_add_voucher_order_unique_index.sql:/docker-entrypoint-initdb.d/02-add-voucher-order-unique-index.sql:ro
       - ./sql/20260512_add_voucher_order_task.sql:/docker-entrypoint-initdb.d/03-add-voucher-order-task.sql:ro
       - ./sql/20260512_adjust_voucher_order_active_unique_index.sql:/docker-entrypoint-initdb.d/04-adjust-voucher-order-active-unique-index.sql:ro
+      - ./sql/20260611_add_voucher_order_redis_release_status.sql:/docker-entrypoint-initdb.d/05-add-voucher-order-redis-release-status.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-locallifehub_root}"]
       interval: 10s

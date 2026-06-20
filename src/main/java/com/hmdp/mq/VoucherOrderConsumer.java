@@ -41,6 +41,12 @@ public class VoucherOrderConsumer implements RocketMQListener<VoucherOrderMessag
                     task.getId(), task.getOrderId(), task.getUserId(), task.getVoucherId());
             return;
         }
+        if (VoucherOrderTaskStatus.RESOLVED.equals(task.getStatus())
+                || VoucherOrderTaskStatus.RELEASING.equals(task.getStatus())) {
+            log.warn("秒杀订单资格已释放或正在释放，跳过消息，taskId={}, orderId={}, status={}",
+                    task.getId(), task.getOrderId(), task.getStatus());
+            return;
+        }
 
         try {
             voucherOrderService.handleVoucherOrderMessage(message);

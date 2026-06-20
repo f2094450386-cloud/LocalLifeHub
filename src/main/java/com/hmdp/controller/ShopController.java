@@ -2,6 +2,7 @@ package com.hmdp.controller;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.hmdp.annotation.AdminOnly;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.service.IShopService;
@@ -30,17 +31,20 @@ public class ShopController {
     }
 
     @PostMapping
+    @AdminOnly
     public Result saveShop(@RequestBody Shop shop) {
         shopService.save(shop);
         return Result.ok();
     }
 
     @PutMapping
+    @AdminOnly
     public Result updateShop(@RequestBody Shop shop) {
         return shopService.update(shop);
     }
 
     @PostMapping("/{id}/cache/preheat")
+    @AdminOnly
     public Result preheatHotShop(@PathVariable("id") Long id) {
         return shopService.preheatHotShop(id);
     }

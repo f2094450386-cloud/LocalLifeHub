@@ -24,5 +24,13 @@ public interface IVoucherOrderTaskService extends IService<VoucherOrderTask> {
 
     boolean markResolved(Long taskId, String reason);
 
+    boolean claimForCompensation(Long taskId, String expectedStatus);
+
+    boolean claimForConsumption(Long orderId);
+
+    boolean claimForRelease(Long taskId, String expectedStatus);
+
+    boolean claimManualRetry(Long taskId);
+
     List<VoucherOrderTask> listDueTasks(LocalDateTime now, int limit);
 }

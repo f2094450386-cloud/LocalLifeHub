@@ -25,5 +25,6 @@ public class OrderTimeoutScanner {
     public void scanExpiredOrders() {
         log.info("开始扫描超时未支付秒杀订单，limit={}", scanLimit);
         voucherOrderService.closeExpiredUnpaidOrders(scanLimit);
+        voucherOrderService.reconcileClosedOrderRedis(scanLimit);
     }
 }

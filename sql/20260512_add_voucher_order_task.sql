@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS `tb_voucher_order_task` (
   `order_id` bigint(20) NOT NULL COMMENT 'voucher order id',
   `user_id` bigint(20) UNSIGNED NOT NULL COMMENT 'user id',
   `voucher_id` bigint(20) UNSIGNED NOT NULL COMMENT 'seckill voucher id',
-  `status` varchar(32) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING,SENT,CONSUMED,FAILED,MANUAL_REVIEW',
+  `status` varchar(32) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING,SENT,PROCESSING,CONSUMING,RELEASING,CONSUMED,FAILED,MANUAL_REVIEW,RESOLVED',
   `retry_count` int(11) NOT NULL DEFAULT 0 COMMENT 'retry count',
   `max_retry` int(11) NOT NULL DEFAULT 5 COMMENT 'max retry count',
   `fail_reason` varchar(512) NULL DEFAULT NULL COMMENT 'latest failure reason',

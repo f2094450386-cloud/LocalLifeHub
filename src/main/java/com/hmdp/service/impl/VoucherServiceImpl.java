@@ -15,7 +15,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.List;
+import java.time.ZoneId;
 
+import static com.hmdp.utils.RedisConstants.SECKILL_BEGIN_TIME_KEY;
+import static com.hmdp.utils.RedisConstants.SECKILL_END_TIME_KEY;
 import static com.hmdp.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
@@ -55,7 +58,19 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         seckillVoucher.setEndTime(voucher.getEndTime());
         seckillVoucherService.save(seckillVoucher);
         // 保存秒杀库存到 Redis，事务提交后执行避免 DB 回滚脏写
-        TransactionUtils.afterCommit(() ->
-                stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString()));
+        TransactionUtils.afterCommit(() -> {
+            stringRedisTemplate.opsForValue().set(
+                    SECKILL_STOCK_KEY + voucher.getId(),
+                    voucher.getStock().toString()
+            );
+            stringRedisTemplate.opsForValue().set(
+                    SECKILL_BEGIN_TIME_KEY + voucher.getId(),
+                    String.valueOf(voucher.getBeginTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
+            );
+            stringRedisTemplate.opsForValue().set(
+                    SECKILL_END_TIME_KEY + voucher.getId(),
+                    String.valueOf(voucher.getEndTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
+            );
+        });
     }
 }
